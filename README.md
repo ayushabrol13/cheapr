@@ -9,8 +9,12 @@ There are no affiliate links, no browsing-history collection and no ads. Price s
 | **Verdict on every product** | A compact bar under the price: *Lowest price ever · Good deal · Fair price · Usually cheaper*, plus the 3-month low and the usual price. It expands to an interactive chart (1M / 3M / 1Y / All). |
 | **Fake-discount detection** | Warns when a price was raised just before a "sale", or when the MRP is far above any price ever seen. |
 | **Price-drop alerts** | Set a target from the card. Alerts arrive by browser notification, Telegram or email (double opt-in). The server re-checks watched products, so alerts fire even when Chrome is closed. |
+| **Compare across stores** | On Amazon, Cheapr finds the same product on Flipkart, and vice versa, showing "₹68 cheaper on Flipkart". Matching is deliberately conservative (brand, model numbers and capacity must agree), and you can report a wrong match. |
+| **Wishlist import** | One click on an Amazon or Flipkart wishlist turns every item into an "any price drop" alert. |
+| **हिन्दी** | The whole extension works in Hindi or English. It follows the browser by default, and you can switch in Settings. |
 | **Coupons at checkout** | On 20 major Indian stores, one click tries every known code and keeps the best one. Rankings come from what actually worked for other users. Coupons on all sites are an optional grant. |
 | **Spend Tracker** (opt-in) | Adds up your Amazon, Flipkart, Swiggy and Zomato orders by year and by merchant. **Order data never leaves your browser.** |
+| **Your data, your call** | Export everything as JSON, or delete it all (local and server) from Settings. |
 | **Admin dashboard** | `/admin` on the server: usage stats, recent price drops, a coupon manager and product search. |
 
 ## Install (development)
@@ -72,5 +76,12 @@ CI runs both suites and builds the extension zip on every push.
 - **Server re-checks may hit captchas.** The worker paces itself and skips any page that doesn't return a price. Crowd observations keep history going regardless.
 - **Spend Tracker and coupons are best-effort.** They read pages and endpoints that stores can change without notice.
 - **Rate limits are per process.** Move them to Redis before running several API workers.
+- **Crowd prices are untrusted.** Prices are tagged by an anonymous install and network. A crowd price fires alerts only after 3 distinct networks agree or the server re-checks it, and out-of-range prices are held until confirmed.
+
+## Release
+
+```bash
+BACKEND_URL=https://api.yourdomain.in extension/scripts/package.sh   # stamps the server into config + host_permissions
+```
 
 License: MIT

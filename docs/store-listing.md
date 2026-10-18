@@ -17,7 +17,10 @@ See real price history on Amazon, Flipkart, Myntra & Ajio, spot fake discounts, 
 > • Fake-discount warnings: when a price was raised just before a "sale", or the MRP is inflated
 > • Price-drop alerts by browser notification, Telegram or email, even when Chrome is closed
 > • Coupons at checkout on 20 major Indian stores: one click tries every code and keeps the best
+> • Compare across stores: see if the same product is cheaper on Flipkart or Amazon
+> • Import your Amazon or Flipkart wishlist and get told about every price drop
 > • Spend Tracker (optional): adds up your Amazon, Flipkart, Swiggy and Zomato orders, entirely on your device
+> • Available in English and हिन्दी
 >
 > What Cheapr never does: no affiliate links or cookie swapping, no browsing-history collection, no selling data. Price sharing is anonymous and opt-in.
 
@@ -30,7 +33,9 @@ See real price history on Amazon, Flipkart, Myntra & Ajio, spot fake discounts, 
 | `notifications` | Shows a desktop notification when a watched product drops below your target price. |
 | `offscreen` | Parses product pages fetched for watched-price re-checks, because service workers have no DOM parser. |
 | `scripting` | Registers the coupon finder on other shopping sites only after you turn on "On all shopping sites" and grant access. |
-| Host: amazon.in, flipkart.com, myntra.com, ajio.com | Reads the product price on product pages to show history, and re-checks watched products. |
+| Host: amazon.in, flipkart.com, myntra.com, ajio.com | Reads the product price on product pages to show history, re-checks watched products, and searches the other store for the same product (price comparison). |
+| Host: the Cheapr server | Fetches price history and saves alerts. Release builds add it automatically (`BACKEND_URL`). |
+| Content scripts on Amazon/Flipkart wishlists | Offers a one-click import of wishlist items as alerts. |
 | Content scripts on 20 Indian store domains | Detects the coupon box at checkout on those stores. |
 | Content scripts on swiggy.com, zomato.com (and the stores above) | Spend Tracker, off by default: reads your own order pages when you press "Scan orders". |
 | Optional host `https://*/*` | Requested only when you enable coupons on all shopping sites, or point Cheapr at your own server. |
@@ -46,8 +51,7 @@ See real price history on Amazon, Flipkart, Myntra & Ajio, spot fake discounts, 
 
 ## Release checklist
 
-1. Set the production server URL as the default `backend` in `extension/background.js` (`DEFAULTS.backend`).
-2. Bump the `version` in `extension/manifest.json`.
-3. Run `npm test` in `extension/` and `pytest` in `backend/`.
-4. Run `extension/scripts/package.sh`, then upload `extension/dist/cheapr-<version>.zip`.
+1. Bump the `version` in `extension/manifest.json`.
+2. Run `npm test` in `extension/` and `pytest` in `backend/`, against both SQLite and Postgres (CI does both).
+3. Run `BACKEND_URL=https://<your server> extension/scripts/package.sh`, then upload `extension/dist/cheapr-<version>.zip`. Never upload a `-dev` zip, because it points at localhost.
 5. Screenshots at 1280×800: the product card collapsed and expanded, the popup's Alerts tab, and the welcome page.
