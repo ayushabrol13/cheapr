@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test test/*.test.mjs"
+    "test": "node --test --test-timeout=30000 test/*.test.mjs"
   },
   "devDependencies": {
     "linkedom": "^0.18.13"

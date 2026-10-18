@@ -3,59 +3,51 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Welcome to Cheapr</title>
+<title>Cheapr</title>
 <link rel="stylesheet" href="welcome.css">
 </head>
 <body>
 <main>
+  <div class="lang"><select id="lang" aria-label="Language"><option value="auto">Auto</option><option value="en">English</option><option value="hi">हिन्दी</option></select></div>
   <header>
     <img src="../icons/128.png" alt="" width="56" height="56">
-    <h1>Cheapr is ready</h1>
-    <p class="lead">Real price history, fake-discount warnings and price-drop alerts, right on the product page.</p>
+    <h1 data-i18n="w_title"></h1>
+    <p class="lead" data-i18n="w_lead"></p>
   </header>
 
   <section class="how">
-    <div><b>1. Open any product</b><span>on Amazon.in, Flipkart, Myntra or Ajio. Cheapr appears under the price.</span></div>
-    <div><b>2. See if it's a real deal</b><span>Lowest price ever, usual price, and whether the "sale" price was inflated first.</span></div>
-    <div><b>3. Set an alert</b><span>Pick a target price. We'll tell you when it drops.</span></div>
+    <div><b data-i18n="w_step1_t"></b><span data-i18n="w_step1"></span></div>
+    <div><b data-i18n="w_step2_t"></b><span data-i18n="w_step2"></span></div>
+    <div><b data-i18n="w_step3_t"></b><span data-i18n="w_step3"></span></div>
   </section>
 
   <form id="setup">
-    <h2>Two quick choices</h2>
-
+    <h2 data-i18n="w_choices"></h2>
     <fieldset>
-      <legend>Help build price history?</legend>
+      <legend data-i18n="w_share_q"></legend>
       <label class="choice"><input type="radio" name="share" value="yes" required>
-        <span><b>Share prices anonymously</b> (recommended)<br>
-        <small>When you open a product, Cheapr sends its store, product ID, title and price. No account, no browsing history, nothing about you. This is how everyone gets history.</small></span></label>
+        <span><b data-i18n="w_share_yes_t"></b> <span data-i18n="w_rec"></span><br><small data-i18n="w_share_yes"></small></span></label>
       <label class="choice"><input type="radio" name="share" value="no">
-        <span><b>Don't share</b><br><small>You'll still see history other people have shared. Products you set alerts on are still tracked.</small></span></label>
+        <span><b data-i18n="w_share_no_t"></b><br><small data-i18n="w_share_no"></small></span></label>
     </fieldset>
-
     <fieldset>
-      <legend>Spend Tracker (optional)</legend>
+      <legend data-i18n="w_spend_q"></legend>
       <label class="choice"><input type="checkbox" name="spend">
-        <span><b>Show a "Scan orders" button on my order pages</b><br>
-        <small>Adds up what you've spent on Amazon, Flipkart, Swiggy and Zomato. Order data never leaves this browser.</small></span></label>
+        <span><b data-i18n="w_spend_t"></b><br><small data-i18n="w_spend"></small></span></label>
     </fieldset>
-
-    <label class="field">Email for price-drop alerts (optional)
+    <label class="field"><span data-i18n="w_email"></span>
       <input type="email" name="email" placeholder="you@example.com" autocomplete="email"></label>
-
-    <button class="primary">Start saving</button>
+    <button class="primary" data-i18n="w_start"></button>
     <p id="status" role="status"></p>
   </form>
 
   <section class="promise">
-    <h2>What Cheapr never does</h2>
-    <ul>
-      <li>No affiliate links or cookie swapping. We don't earn from your purchases.</li>
-      <li>No browsing history collection. Cheapr only runs on supported shopping sites.</li>
-      <li>No selling or sharing of data. Spend and order data stay on your device.</li>
-    </ul>
-    <p class="muted">You can change any of this later in the Cheapr popup → Settings. <a href="https://github.com/ayushabrol13/cheapr/blob/main/PRIVACY.md" target="_blank" rel="noopener">Privacy policy</a></p>
+    <h2 data-i18n="w_never"></h2>
+    <ul><li data-i18n="w_never1"></li><li data-i18n="w_never2"></li><li data-i18n="w_never3"></li></ul>
+    <p class="muted"><span data-i18n="w_later"></span> <a href="https://github.com/ayushabrol13/cheapr/blob/main/PRIVACY.md" target="_blank" rel="noopener" data-i18n="w_privacy"></a></p>
   </section>
 </main>
+<script src="../lib/i18n.js"></script>
 <script src="welcome.js"></script>
 </body>
 </html>

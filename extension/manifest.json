@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "__MSG_extName__",
   "short_name": "Cheapr",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "__MSG_extDescription__",
   "icons": {
     "16": "icons/16.png",
@@ -49,6 +49,7 @@
       ],
       "js": [
         "lib/extract.js",
+        "lib/i18n.js",
         "lib/format.js",
         "content/product.js"
       ],
@@ -98,6 +99,8 @@
         "https://meesho.com/*"
       ],
       "js": [
+        "lib/i18n.js",
+        "lib/format.js",
         "content/coupons.js"
       ],
       "run_at": "document_idle"
@@ -110,7 +113,22 @@
         "https://www.zomato.com/*"
       ],
       "js": [
+        "lib/i18n.js",
+        "lib/format.js",
         "content/spend.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://www.amazon.in/hz/wishlist/*",
+        "https://www.flipkart.com/wishlist*"
+      ],
+      "js": [
+        "lib/i18n.js",
+        "lib/format.js",
+        "lib/compare.js",
+        "content/wishlist.js"
       ],
       "run_at": "document_idle"
     }

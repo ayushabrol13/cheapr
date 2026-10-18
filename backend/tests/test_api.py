@@ -189,3 +189,14 @@ def test_bulk_import_creates_watches_in_one_request(c):
     assert r.status_code == 200 and r.json()["added"] == 30  # off-store URL skipped
     watches = c.get("/api/v1/watches", params={"client_id": cid}).json()
     assert len(watches) == 30 and all(w["mode"] == "any" and w["target_price"] == w["price"] - 1 for w in watches)
+
+
+def test_bulk_import_is_charged_per_item(c, monkeypatch):
+    import app.main as m
+    monkeypatch.setitem(m.LIMITS, "POST", 10)
+    m._hits.clear()
+    items = [{"store": "amazon", "product_id": f"B0CHRG{i:04d}", "url": f"https://www.amazon.in/dp/B0CHRG{i:04d}",
+              "title": "x", "price": 10} for i in range(20)]
+    r = c.post("/api/v1/watches/bulk", json={"client_id": str(uuid.uuid4()), "items": items})
+    assert r.status_code == 429
+    m._hits.clear()

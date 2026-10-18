@@ -6,12 +6,12 @@
 <link rel="stylesheet" href="popup.css">
 </head>
 <body>
-<header><img src="../icons/32.png" alt="" width="22" height="22"><b>Cheapr</b><span id="quiet-pill" class="pill" hidden>Paused</span></header>
-<nav role="tablist" aria-label="Cheapr sections">
-  <button role="tab" id="tab-page" aria-controls="page" aria-selected="true" data-tab="page">This page</button>
-  <button role="tab" id="tab-alerts" aria-controls="alerts" aria-selected="false" data-tab="alerts">Alerts <span id="alert-count" class="count" hidden></span></button>
-  <button role="tab" id="tab-spend" aria-controls="spend" aria-selected="false" data-tab="spend">Spending</button>
-  <button role="tab" id="tab-settings" aria-controls="settings" aria-selected="false" data-tab="settings">Settings</button>
+<header><img src="../icons/32.png" alt="" width="22" height="22"><b>Cheapr</b><span id="quiet-pill" class="pill" data-i18n="p_paused" hidden></span></header>
+<nav role="tablist" aria-label="Cheapr">
+  <button role="tab" id="tab-page" aria-controls="page" aria-selected="true" data-tab="page" data-i18n="p_tab_page"></button>
+  <button role="tab" id="tab-alerts" aria-controls="alerts" aria-selected="false" data-tab="alerts"><span data-i18n="p_tab_alerts"></span> <span id="alert-count" class="count" hidden></span></button>
+  <button role="tab" id="tab-spend" aria-controls="spend" aria-selected="false" data-tab="spend" data-i18n="p_tab_spend"></button>
+  <button role="tab" id="tab-settings" aria-controls="settings" aria-selected="false" data-tab="settings" data-i18n="p_tab_settings"></button>
 </nav>
 <main>
   <section id="page" role="tabpanel" aria-labelledby="tab-page"></section>
@@ -19,29 +19,38 @@
   <section id="spend" role="tabpanel" aria-labelledby="tab-spend" hidden></section>
   <section id="settings" role="tabpanel" aria-labelledby="tab-settings" hidden>
     <form id="settings-form">
-      <h3>Price history</h3>
-      <label class="toggle"><input name="overlay" type="checkbox"><span>Show Cheapr on product pages</span></label>
-      <label class="toggle"><input name="share" type="checkbox"><span>Share prices anonymously<small>Store, product ID, title and price of products you open. Nothing about you.</small></span></label>
-      <h3>Alerts</h3>
+      <h3 data-i18n="s_language"></h3>
+      <select name="lang" aria-label="Language">
+        <option value="auto" data-i18n="s_lang_auto"></option>
+        <option value="en">English</option>
+        <option value="hi">हिन्दी</option>
+      </select>
+      <h3 data-i18n="s_price_history"></h3>
+      <label class="toggle"><input name="overlay" type="checkbox"><span data-i18n="s_show_card"></span></label>
+      <label class="toggle"><input name="share" type="checkbox"><span><span data-i18n="s_share"></span><small data-i18n="s_share_hint"></small></span></label>
+      <h3 data-i18n="s_alerts"></h3>
       <div id="telegram" class="tg" hidden></div>
-      <label class="field">Email for price drops (optional)<input name="email" type="email" placeholder="you@example.com" autocomplete="email"></label>
+      <label class="field"><span data-i18n="s_email"></span><input name="email" type="email" placeholder="you@example.com" autocomplete="email"></label>
       <p class="muted small" id="email-status"></p>
-      <h3>Coupons</h3>
-      <label class="toggle"><input name="coupons" type="checkbox"><span>Find coupons at checkout</span></label>
-      <label class="toggle"><input name="allSites" type="checkbox"><span>On all shopping sites<small>By default Cheapr only runs on 20 major Indian stores. This asks Chrome for access to other sites.</small></span></label>
-      <h3>Spending</h3>
-      <label class="toggle"><input name="spend" type="checkbox"><span>Spend Tracker on order pages<small>Order data never leaves this browser.</small></span></label>
-      <h3>Quiet</h3>
-      <label class="toggle"><input name="quiet" type="checkbox"><span>Pause Cheapr on all sites</span></label>
+      <h3 data-i18n="s_coupons"></h3>
+      <label class="toggle"><input name="coupons" type="checkbox"><span data-i18n="s_find_coupons"></span></label>
+      <label class="toggle"><input name="allSites" type="checkbox"><span><span data-i18n="s_all_sites"></span><small data-i18n="s_all_sites_hint"></small></span></label>
+      <h3 data-i18n="s_spending"></h3>
+      <label class="toggle"><input name="spend" type="checkbox"><span><span data-i18n="s_spend_toggle"></span><small data-i18n="s_spend_hint"></small></span></label>
+      <h3 data-i18n="s_quiet"></h3>
+      <label class="toggle"><input name="quiet" type="checkbox"><span data-i18n="s_pause"></span></label>
       <div id="muted"></div>
-      <details><summary>Advanced</summary>
-        <label class="field">Server URL<input name="backend" type="url" required></label>
+      <h3 data-i18n="s_data"></h3>
+      <div class="links"><button type="button" class="btn ghost" id="export" data-i18n="s_export"></button><button type="button" class="btn danger" id="delete" data-i18n="s_delete"></button></div>
+      <details><summary data-i18n="s_advanced"></summary>
+        <label class="field"><span data-i18n="s_server"></span><input name="backend" type="url" required></label>
       </details>
       <p class="muted" id="settings-status" role="status"></p>
-      <p class="muted small"><a href="../welcome/welcome.html" target="_blank">Privacy &amp; setup</a> · v<span id="version"></span></p>
+      <p class="muted small"><a href="../welcome/welcome.html" target="_blank" data-i18n="s_privacy"></a> · v<span id="version"></span></p>
     </form>
   </section>
 </main>
+<script src="../lib/i18n.js"></script>
 <script src="../lib/format.js"></script>
 <script src="popup.js"></script>
 </body>

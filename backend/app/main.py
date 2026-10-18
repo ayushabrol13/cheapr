@@ -104,6 +104,14 @@ async def db_session(request: Request, call_next):
         return response
 
 
+def charge(request: Request, n: int) -> None:
+    """Count n extra writes against this client's per-IP limit (bulk endpoints mustn't be a limiter bypass)."""
+    q, t = _hits[(client_ip(request), "POST")], time.monotonic()
+    if len(q) + n > LIMITS["POST"]:
+        raise HTTPException(429, "rate limited", headers={"Retry-After": "60"})
+    q.extend([t] * n)
+
+
 def get_db(request: Request):
     return request.state.db
 
@@ -416,6 +424,7 @@ class BulkWatchIn(BaseModel):
 @app.post("/api/v1/watches/bulk")
 def bulk_watches(body: BulkWatchIn, request: Request, bg: BackgroundTasks, db=Depends(get_db)):
     """Wishlist import: record each item's price and watch it, in one request (stays inside per-IP rate limits)."""
+    charge(request, len(body.items) - 1)  # the request itself was already counted once
     source, net = source_of(body.client_id, request)
     added = 0
     for it in body.items:

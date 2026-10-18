@@ -3,7 +3,9 @@
 (() => {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const num = (s) => Number(String(s).replace(/[^\d.]/g, "")) || 0;
-  const iso = (d) => (isNaN(d) ? null : d.toISOString().slice(0, 10));
+  // Local calendar date: toISOString() would shift Indian dates back a day (UTC+5:30), e.g. 1 Jan into last year.
+  const iso = (d) => (isNaN(d) ? null : `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`);
+  const { inr, t } = CheaprFormat;
 
   const SITES = {
     amazon: {
@@ -15,9 +17,9 @@
         const orders = new Map();
         for (const y of years) {
           for (let start = 0; start < 1000; start += 10) {
-            progress(`Amazon ${y}: ${orders.size} orders so far…`);
+            progress(t("scan_progress", { site: `Amazon ${y}`, n: orders.size }));
             const res = await fetch(`/your-orders/orders?timeFilter=year-${y}&startIndex=${start}`, { credentials: "include" });
-            if (res.url.includes("/ap/signin")) throw new Error("Please sign in to Amazon first.");
+            if (res.url.includes("/ap/signin")) throw new Error(t("sign_in_first", { site: "Amazon" }));
             const doc = new DOMParser().parseFromString(await res.text(), "text/html");
             const cards = doc.querySelectorAll(".order-card, .js-order-card");
             for (const c of cards) {
@@ -40,7 +42,7 @@
         const orders = [];
         let last = "";
         for (let page = 0; page < 300; page++) {
-          progress(`Swiggy: ${orders.length} orders so far…`);
+          progress(t("scan_progress", { site: "Swiggy", n: orders.length }));
           const res = await fetch(`/dapi/order/all?order_id=${last}`, { credentials: "include" });
           const batch = (await res.json())?.data?.orders || [];
           if (!batch.length) break;
@@ -60,7 +62,7 @@
       async scan(progress) {
         const orders = [];
         for (let page = 1, pages = 1; page <= pages && page <= 300; page++) {
-          progress(`Zomato: page ${page}/${pages}…`);
+          progress(t("scan_pages", { site: "Zomato", page, pages }));
           const json = await (await fetch(`/webroutes/user/orders?page=${page}`, { credentials: "include" })).json();
           pages = json?.sections?.SECTION_USER_ORDER_HISTORY?.totalPages || pages;
           for (const o of Object.values(json?.entities?.ORDER || {})) {
@@ -81,7 +83,7 @@
           const n = document.querySelectorAll('a[href*="order_details"]').length;
           if (n === seen) break;
           seen = n;
-          progress(`Flipkart: loading orders (${n})…`);
+          progress(t("scan_progress", { site: "Flipkart", n }));
           window.scrollTo(0, document.body.scrollHeight);
           await sleep(1500);
         }
@@ -97,37 +99,50 @@
     },
   };
 
-  const site = Object.keys(SITES).find((k) => SITES[k].test());
-  if (!site) return;
-  chrome.storage.sync.get({ spend: false }).then(({ spend }) => spend && showButton());
-
-  function showButton() {
-
-  const host = document.createElement("cheapr-spend");
-  const root = host.attachShadow({ mode: "closed" });
-  root.innerHTML = `<style>
-    :host{all:initial;position:fixed;right:16px;bottom:16px;z-index:2147483647;font:13px/1.4 system-ui,sans-serif}
-    div{background:#fff;border:1px solid #e4e7ec;border-radius:12px;box-shadow:0 8px 24px rgba(16,24,40,.15);padding:10px 14px;display:flex;gap:10px;align-items:center;color:#101828;max-width:320px}
-    button{background:#6941c6;color:#fff;border:0;border-radius:8px;padding:5px 10px;cursor:pointer;font:inherit;white-space:nowrap}
-    button:focus-visible{outline:2px solid #6941c6;outline-offset:2px}
-    .x{background:none;color:#667085;padding:2px 6px;font-size:16px}
-  </style><div role="status"><span>Cheapr Spend Tracker: add up what you've spent here (stays on this device).</span><button class="scan">Scan orders</button><button class="x" aria-label="Hide">×</button></div>`;
-  const msg = root.querySelector("span"), btn = root.querySelector(".scan");
-  root.querySelector(".x").onclick = () => host.remove();
-  btn.onclick = async () => {
-    btn.disabled = true;
-    try {
-      const orders = (await SITES[site].scan((t) => (msg.textContent = t))).filter((o) => o.date && o.amount > 0);
-      const { spend = {} } = await chrome.storage.local.get("spend");
-      spend[site] = { scannedAt: new Date().toISOString(), orders };
-      await chrome.storage.local.set({ spend });
-      const total = orders.reduce((s, o) => s + o.amount, 0);
-      msg.textContent = `${orders.length} orders, ₹${Math.round(total).toLocaleString("en-IN")} total. Open the Cheapr popup for the breakdown.`;
-    } catch (e) {
-      msg.textContent = `Scan failed: ${e.message}`;
-    }
-    btn.remove();
-  };
-  document.documentElement.append(host);
+  let host;
+  async function check() {
+    const site = Object.keys(SITES).find((k) => SITES[k].test());
+    const { spend: enabled, quiet } = await chrome.storage.sync.get({ spend: false, quiet: false });
+    if (!site || !enabled || quiet) { host?.remove(); host = null; return; }
+    if (!host?.isConnected) showButton(site);
   }
+
+  function showButton(site) {
+    host = document.createElement("cheapr-spend");
+    const root = host.attachShadow({ mode: "closed" });
+    root.innerHTML = `<style>
+      :host{all:initial;position:fixed;right:16px;bottom:16px;z-index:2147483647;font:13px/1.4 system-ui,"Noto Sans Devanagari",sans-serif}
+      div{background:#fff;border:1px solid #e4e7ec;border-radius:12px;box-shadow:0 8px 24px rgba(16,24,40,.15);padding:10px 14px;display:flex;gap:10px;align-items:center;color:#101828;max-width:340px}
+      button{background:#6941c6;color:#fff;border:0;border-radius:8px;padding:5px 10px;cursor:pointer;font:inherit;white-space:nowrap}
+      button:focus-visible{outline:2px solid #6941c6;outline-offset:2px}
+      .x{background:none;color:#667085;padding:2px 6px;font-size:16px}
+      @media (prefers-color-scheme:dark){div{background:#161b26;border-color:#333741;color:#f2f4f7}}
+    </style><div role="status"><span></span><button class="scan"></button><button class="x"></button></div>`;
+    const msg = root.querySelector("span"), btn = root.querySelector(".scan"), x = root.querySelector(".x");
+    msg.textContent = t("spend_prompt");
+    btn.textContent = t("scan_orders");
+    x.textContent = "×";
+    x.setAttribute("aria-label", t("hide"));
+    x.onclick = () => host.remove();
+    btn.onclick = async () => {
+      btn.disabled = true;
+      try {
+        const orders = (await SITES[site].scan((text) => (msg.textContent = text))).filter((o) => o.date && o.amount > 0);
+        const { spend = {} } = await chrome.storage.local.get("spend");
+        spend[site] = { scannedAt: new Date().toISOString(), orders };
+        await chrome.storage.local.set({ spend });
+        msg.textContent = t("spend_done", { n: orders.length, total: inr(orders.reduce((s, o) => s + o.amount, 0)) });
+      } catch (e) {
+        msg.textContent = t("scan_failed", { err: e.message });
+      }
+      btn.remove();
+    };
+    document.documentElement.append(host);
+  }
+
+  CheaprI18n.load().then(check);
+  // Order pages are often reached by in-app navigation (Swiggy, Zomato); settings apply to open tabs.
+  let href = location.href;
+  setInterval(() => { if (location.href !== href) { href = location.href; check(); } }, 1500);
+  chrome.storage.onChanged.addListener((c) => { if ("spend" in c || "quiet" in c || "lang" in c) { host?.remove(); host = null; CheaprI18n.load().then(check); } });
 })();
