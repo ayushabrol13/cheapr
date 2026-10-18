@@ -38,8 +38,8 @@ function watchItem(w) {
     w.image ? el("img", { src: w.image, alt: "" }) : null,
     el("div", {},
       el("a", { href: safeUrl, target: "_blank", rel: "noopener", textContent: w.title || w.product_id }),
-      el("div", { className: "meta" }, `${w.store} · now ${inr(w.price)} · target ${inr(w.target_price)} `,
-        w.triggered_at ? el("span", { className: "hit", textContent: `Dropped to ${inr(w.triggered_price)}` }) : null)),
+      el("div", { className: "meta", textContent: `${w.store} · now ${inr(w.price)} · target ${inr(w.target_price)}` }),
+      w.triggered_at ? el("div", { className: "meta hit", textContent: `Price dropped to ${inr(w.triggered_price)}` }) : null),
     del);
 }
 
