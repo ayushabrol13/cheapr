@@ -2,11 +2,10 @@ import json
 from contextlib import asynccontextmanager
 import logging
 import os
-import smtplib
+import secrets
 import time
 from collections import defaultdict, deque
 from datetime import datetime, timedelta
-from email.message import EmailMessage
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -16,7 +15,8 @@ from pydantic import BaseModel, Field
 from sqlalchemy import case, func, select
 
 from .insights import Point, analyze
-from .models import Base, Coupon, CouponReport, Price, Product, Session, Watch, engine, now
+from .alerts import send_alert
+from .models import Base, Coupon, CouponReport, Price, Product, Session, TelegramLink, Watch, engine, now
 
 log = logging.getLogger("cheapr")
 
@@ -59,12 +59,13 @@ async def rate_limit(request: Request, call_next):
         ip = request.client.host if request.client else "?"
         if os.environ.get("TRUST_PROXY") and request.headers.get("x-forwarded-for"):
             ip = request.headers["x-forwarded-for"].split(",")[-1].strip()  # right-most = added by our proxy, not the client
-        q, t = _hits[(ip, request.method)], time.monotonic()
+        t = time.monotonic()
+        if len(_hits) > 50_000:  # bound memory under key churn: drop idle keys before touching ours
+            for k in [k for k, v in _hits.items() if not v or t - v[-1] > 60]:
+                del _hits[k]
+        q = _hits[(ip, request.method)]
         while q and t - q[0] > 60:
             q.popleft()
-        if len(_hits) > 50_000:  # bound memory under key churn; dropping state only loosens limits briefly
-            for k in [k for k, v in _hits.items() if not v]:
-                del _hits[k]
         if len(q) >= limit:
             return JSONResponse({"detail": "rate limited"}, status_code=429, headers={"Retry-After": "60"})
         q.append(t)
@@ -104,36 +105,43 @@ def find_product(db, store: str, product_id: str) -> Product | None:
 
 @app.post("/api/v1/observations")
 def observe(o: Observation, bg: BackgroundTasks, db=Depends(get_db)):
-    # shortcut: crowd-submitted prices are trusted after a host check; add per-client rate limits before going public
     if not host_ok(o.store, o.url):
         raise HTTPException(422, "url does not belong to store")
     p = find_product(db, o.store, o.product_id)
     if p is not None and not (p.last_price * MAX_SWING[0] <= o.price <= p.last_price * MAX_SWING[1]):
         raise HTTPException(422, "price differs too much from recent history")
-    if o.mrp is not None and not (o.price <= o.mrp <= o.price * 20):
-        o.mrp = None  # implausible MRP: keep the price, drop the MRP
     if p is None:
         p = Product(store=o.store, product_id=o.product_id, url=o.url, last_price=o.price)
         db.add(p)
         db.flush()
-    last = db.scalar(select(Price).where(Price.product_fk == p.id).order_by(Price.observed_at.desc()).limit(1))
-    if not (last and last.price == o.price and last.in_stock == o.in_stock and now() - last.observed_at < DEDUPE_WINDOW):
-        db.add(Price(product_fk=p.id, price=o.price, mrp=o.mrp, in_stock=o.in_stock))
     p.title, p.image, p.currency = o.title or p.title, o.image or p.image, o.currency
-    p.last_price, p.updated_at = o.price, now()
-    if o.in_stock:
-        trigger_watches(db, p, bg)
+    for alert in record_price(db, p, o.price, o.mrp, o.in_stock):
+        bg.add_task(send_alert, alert)
     return {"ok": True}
 
 
-def trigger_watches(db, p: Product, bg: BackgroundTasks | None) -> None:
+def record_price(db, p: Product, price: float, mrp: float | None, in_stock: bool) -> list[dict]:
+    """Store a price point (deduped) and fire watches. Returns alerts to deliver. Shared by the API and the worker."""
+    if mrp is not None and not (price <= mrp <= price * 20):
+        mrp = None  # implausible MRP: keep the price, drop the MRP
+    last = db.scalar(select(Price).where(Price.product_fk == p.id).order_by(Price.observed_at.desc()).limit(1))
+    if not (last and last.price == price and last.in_stock == in_stock and now() - last.observed_at < DEDUPE_WINDOW):
+        db.add(Price(product_fk=p.id, price=price, mrp=mrp, in_stock=in_stock))
+    p.last_price, p.updated_at = price, now()
+    return trigger_watches(db, p) if in_stock else []
+
+
+def trigger_watches(db, p: Product) -> list[dict]:
+    alerts = []
     hits = db.scalars(select(Watch).where(Watch.product_fk == p.id, Watch.triggered_at.is_(None),
-                                          Watch.target_price >= p.last_price))
+                                          Watch.target_price >= p.last_price)).all()
     for w in hits:
         w.triggered_at, w.triggered_price = now(), p.last_price
-        # shortcut: emails go to unverified addresses; add double opt-in + per-address rate limit before going public
-        if w.email and bg is not None:
-            bg.add_task(send_email, w.email, p.title, p.url, p.last_price, p.currency)
+        link = db.scalar(select(TelegramLink).where(TelegramLink.client_id == w.client_id, TelegramLink.chat_id.is_not(None)))
+        # shortcut: emails go to unverified addresses; add double opt-in before opening the server to the public
+        alerts.append({"title": p.title, "url": p.url, "price": p.last_price, "target": w.target_price,
+                       "email": w.email, "chat_id": link.chat_id if link else None})
+    return alerts
 
 
 @app.get("/api/v1/products/{store}/{product_id}/history")
@@ -182,7 +190,7 @@ def add_watch(body: WatchIn, db=Depends(get_db)):
         db.add(w)
     w.target_price, w.email, w.triggered_at, w.triggered_price = body.target_price, body.email, None, None
     db.flush()
-    trigger_watches(db, p, None)  # already below target: flag it, but never email on save (spam relay)
+    trigger_watches(db, p)  # already below target: flag it, but never send alerts on save (spam relay)
     return watch_out(w, p)
 
 
@@ -202,23 +210,37 @@ def delete_watch(watch_id: int, client_id: str, db=Depends(get_db)):
     return {"ok": True}
 
 
-def send_email(to: str, title: str, url: str, price: float, currency: str) -> None:
-    host = os.environ.get("SMTP_HOST")
-    if not host:
-        return
-    msg = EmailMessage()
-    msg["Subject"] = f"Price drop: {title[:80]} is now {currency} {price:,.0f}"
-    msg["From"] = os.environ.get("SMTP_FROM", "cheapr@localhost")
-    msg["To"] = to
-    msg.set_content(f"{title}\n\nNow {currency} {price:,.2f}, at or below your target.\n\n{url}\n\n- Cheapr")
-    try:
-        with smtplib.SMTP(host, int(os.environ.get("SMTP_PORT", "587")), timeout=15) as s:
-            s.starttls()
-            if os.environ.get("SMTP_USER"):
-                s.login(os.environ["SMTP_USER"], os.environ.get("SMTP_PASSWORD", ""))
-            s.send_message(msg)
-    except Exception:
-        log.exception("alert email failed")
+# ---------- telegram ----------
+
+class ClientIn(BaseModel):
+    client_id: str = Field(pattern=UUID)
+
+
+@app.post("/api/v1/telegram/link")
+def telegram_link(body: ClientIn, db=Depends(get_db)):
+    bot = os.environ.get("TELEGRAM_BOT_USERNAME")
+    if not bot or not os.environ.get("TELEGRAM_BOT_TOKEN"):
+        raise HTTPException(503, "Telegram alerts are not configured on this server")
+    link = db.scalar(select(TelegramLink).where(TelegramLink.client_id == body.client_id))
+    if link is None:
+        link = TelegramLink(client_id=body.client_id, code=secrets.token_urlsafe(16)[:24])
+        db.add(link)
+    return {"url": f"https://t.me/{bot}?start={link.code}", "connected": link.chat_id is not None}
+
+
+@app.get("/api/v1/telegram/status")
+def telegram_status(client_id: str = Query(pattern=UUID), db=Depends(get_db)):
+    link = db.scalar(select(TelegramLink).where(TelegramLink.client_id == client_id))
+    return {"available": bool(os.environ.get("TELEGRAM_BOT_TOKEN") and os.environ.get("TELEGRAM_BOT_USERNAME")),
+            "connected": bool(link and link.chat_id)}
+
+
+@app.delete("/api/v1/telegram/link")
+def telegram_unlink(client_id: str = Query(pattern=UUID), db=Depends(get_db)):
+    link = db.scalar(select(TelegramLink).where(TelegramLink.client_id == client_id))
+    if link:
+        db.delete(link)
+    return {"ok": True}
 
 
 # ---------- coupons ----------

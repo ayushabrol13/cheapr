@@ -148,6 +148,26 @@ function topLabels(orders) {
   return Object.entries(sum).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k, v]) => `${k} (${inr(v)})`);
 }
 
+// ---------- telegram ----------
+async function renderTelegram() {
+  const box = $("#telegram");
+  const st = await send({ type: "telegram", action: "status" }).catch(() => null);
+  if (!st?.available) { box.hidden = true; return; } // server has no bot configured
+  box.hidden = false;
+  if (st.connected) {
+    const off = el("button", { type: "button", className: "btn ghost", textContent: "Disconnect" });
+    off.onclick = async () => { await send({ type: "telegram", action: "unlink" }); renderTelegram(); };
+    box.replaceChildren(el("span", { className: "ok", textContent: "✓ Telegram alerts on" }), off);
+  } else {
+    const on = el("button", { type: "button", className: "btn", textContent: "Connect" });
+    on.onclick = async () => {
+      const { url } = await send({ type: "telegram", action: "link" });
+      chrome.tabs.create({ url }); // user presses Start in Telegram; the server links the chat
+    };
+    box.replaceChildren(el("span", { textContent: "Get alerts on Telegram" }), on);
+  }
+}
+
 // ---------- settings ----------
 async function renderSettings() {
   const s = await send({ type: "settings" });
@@ -203,3 +223,4 @@ renderPage();
 renderAlerts();
 renderSpend();
 renderSettings();
+renderTelegram();

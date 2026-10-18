@@ -1,7 +1,13 @@
 // Service worker: the only part that talks to the Cheapr backend (content scripts would hit page CORS).
 // share: anonymous price uploads (opt-in, chosen on the welcome page). spend: spend tracker (opt-in).
 const DEFAULTS = { backend: "http://localhost:8000", email: "", overlay: true, coupons: true, share: false, spend: false, quiet: false };
-const SCHEMA = 2; // bump + add a step in migrate() when stored data changes shape
+const SCHEMA = 2;
+// Never run on banking, government, education, health or payment sites, even with the all-sites grant.
+const SENSITIVE = ["*://*.gov.in/*", "*://*.nic.in/*", "*://*.gov/*", "*://*.bank.in/*", "*://*.bank/*", "*://*.edu/*",
+  "*://*.ac.in/*", "*://*.edu.in/*", "*://*.res.in/*", "*://*.mil/*", "*://*.icicibank.com/*", "*://*.hdfcbank.com/*",
+  "*://*.axisbank.com/*", "*://*.sbi.co.in/*", "*://*.onlinesbi.sbi/*", "*://*.kotak.com/*", "*://*.paypal.com/*",
+  "*://*.paytm.com/*", "*://*.phonepe.com/*", "*://*.razorpay.com/*", "*://*.juspay.in/*", "*://*.billdesk.com/*",
+  "*://*.practo.com/*", "*://*.apollo247.com/*", "*://*.incometax.gov.in/*", "*://*.irctc.co.in/*"]; // bump + add a step in migrate() when stored data changes shape
 
 async function settings() {
   return { ...DEFAULTS, ...(await chrome.storage.sync.get(Object.keys(DEFAULTS))) };
@@ -76,13 +82,21 @@ const handlers = {
     });
   },
   settings,
+  async telegram({ action }) {
+    const client_id = await clientId();
+    if (action === "link") return api("/api/v1/telegram/link", { method: "POST", body: { client_id } });
+    if (action === "unlink") return api("/api/v1/telegram/link", { method: "DELETE", query: { client_id } });
+    return api("/api/v1/telegram/status", { query: { client_id } });
+  },
   // Optional "coupons on every site": the popup obtains the host grant (needs a user gesture), we register the script.
   async setAllSiteCoupons({ enabled }) {
     const id = "coupons-all";
     const existing = await chrome.scripting.getRegisteredContentScripts({ ids: [id] });
     if (existing.length) await chrome.scripting.unregisterContentScripts({ ids: [id] });
     if (enabled && (await chrome.permissions.contains({ origins: ["https://*/*"] }))) {
-      await chrome.scripting.registerContentScripts([{ id, js: ["content/coupons.js"], matches: ["https://*/*"], runAt: "document_idle" }]);
+      await chrome.scripting.registerContentScripts([{
+        id, js: ["content/coupons.js"], matches: ["https://*/*"], excludeMatches: SENSITIVE, runAt: "document_idle",
+      }]);
     }
     return { enabled: enabled && (await chrome.scripting.getRegisteredContentScripts({ ids: [id] })).length > 0 };
   },

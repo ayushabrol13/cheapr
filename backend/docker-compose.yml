@@ -18,5 +18,15 @@ services:
       DATABASE_URL: postgresql+psycopg://cheapr:${POSTGRES_PASSWORD:-cheapr}@db:5432/cheapr
     depends_on:
       db: {condition: service_healthy}
+    restart: unless-stopped
+  worker:
+    build: .
+    command: ["python", "-m", "app.worker"]
+    env_file: [{path: .env, required: false}]
+    environment:
+      DATABASE_URL: postgresql+psycopg://cheapr:${POSTGRES_PASSWORD:-cheapr}@db:5432/cheapr
+    depends_on:
+      db: {condition: service_healthy}
+    restart: unless-stopped
 volumes:
   pgdata:

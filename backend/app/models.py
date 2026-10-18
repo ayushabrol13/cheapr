@@ -1,7 +1,7 @@
 import os
 from datetime import datetime, timezone
 
-from sqlalchemy import (Boolean, DateTime, Float, ForeignKey, String, UniqueConstraint,
+from sqlalchemy import (BigInteger, Boolean, DateTime, Float, ForeignKey, String, UniqueConstraint,
                         create_engine)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
@@ -74,3 +74,13 @@ class CouponReport(Base):
     worked: Mapped[bool] = mapped_column(Boolean)
     saving: Mapped[float] = mapped_column(Float, default=0)
     reported_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+
+class TelegramLink(Base):
+    """Links an anonymous client to a Telegram chat. code is the one-time /start payload."""
+    __tablename__ = "telegram_links"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    client_id: Mapped[str] = mapped_column(String(64), unique=True)
+    code: Mapped[str] = mapped_column(String(32), unique=True)
+    chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
