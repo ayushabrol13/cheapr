@@ -1,7 +1,7 @@
 import uuid
 
 import pytest
-from fastapi.testclient import TestClient
+from conftest import NetClient as TestClient  # observation posts come from distinct networks
 
 from app.main import app
 
@@ -154,3 +154,25 @@ def test_failed_commit_is_not_reported_as_success(c):
 
     with TestClient(app, raise_server_exceptions=False) as client:
         assert client.post("/api/v1/_probe_commit").status_code == 500
+
+
+def test_same_network_installs_do_not_confirm_each_other(c):
+    cid = str(uuid.uuid4())
+    o = lambda: {**OBS, "product_id": "B0SYBIL001", "url": "https://www.amazon.in/dp/B0SYBIL001",  # noqa: E731
+                 "client_id": str(uuid.uuid4())}
+    c.post("/api/v1/observations", json={**o(), "price": 1000})
+    c.post("/api/v1/watches", json={"client_id": cid, "store": "amazon", "product_id": "B0SYBIL001", "target_price": 900})
+    same_net = {"X-Forwarded-For": "203.0.113.5"}
+    for _ in range(5):  # many fake installs, one network
+        c.post("/api/v1/observations", json={**o(), "price": 850}, headers=same_net)
+    [w] = c.get("/api/v1/watches", params={"client_id": cid}).json()
+    assert w["triggered_at"] is None
+
+
+def test_image_urls_are_strictly_validated():
+    from app.main import safe_image
+    assert safe_image("amazon", "https://m.media-amazon.com/images/I/a.jpg") == "https://m.media-amazon.com/images/I/a.jpg"
+    for bad in ["https://evil.example\\@m.media-amazon.com/x.jpg", "https://u:p@m.media-amazon.com/x.jpg",
+                "http://m.media-amazon.com/x.jpg", "https://m.media-amazon.com.evil.example/x.jpg",
+                "https://m.media-amazon.com:8443/x.jpg", "https://rukmini1.flixcart.com/x.jpg"]:
+        assert safe_image("amazon", bad) == "", bad

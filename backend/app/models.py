@@ -43,6 +43,7 @@ class Price(Base):
     in_stock: Mapped[bool] = mapped_column(Boolean, default=True)
     observed_at: Mapped[datetime] = mapped_column(DateTime, default=now, index=True)
     source: Mapped[str] = mapped_column(String(16), default="")  # hashed install id, "worker", or ""
+    net: Mapped[str] = mapped_column(String(16), default="")  # hashed client network (/24 or /48): Sybil resistance
     suspect: Mapped[bool] = mapped_column(Boolean, default=False)  # outside the sanity band, awaiting a 2nd source
 
 
@@ -104,13 +105,14 @@ class EmailAddress(Base):
 
 
 class EmailThrottle(Base):
-    """One row per address, used only as a lock: budget checks for an address are serialised on it."""
+    """One row per address (stored as a SHA-256 digest), used only as a lock for that address's budget checks."""
     __tablename__ = "email_throttle"
     email: Mapped[str] = mapped_column(String(320), primary_key=True)
 
 
 class EmailSend(Base):
-    """Append-only log of mails sent; budgets count rows in a rolling 24h window."""
+    """Append-only log of mails sent; budgets count rows in a rolling 24h window. email holds a SHA-256 digest,
+    never the address, so the log can outlive a deletion request without keeping PII."""
     __tablename__ = "email_sends"
     __table_args__ = (Index("ix_email_sends_email_kind_at", "email", "kind", "sent_at"),)
     id: Mapped[int] = mapped_column(primary_key=True)

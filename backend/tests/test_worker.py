@@ -5,7 +5,7 @@ from pathlib import Path
 
 import httpx
 import pytest
-from fastapi.testclient import TestClient
+from conftest import NetClient as TestClient  # observation posts come from distinct networks
 from sqlalchemy import select
 
 import app.worker as worker

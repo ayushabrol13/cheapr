@@ -9,7 +9,7 @@ import time
 from datetime import timedelta
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from .alerts import send_alert, telegram_api
 from .extract import extract_price
@@ -51,16 +51,21 @@ def fetch_store_page(client: httpx.Client, store: str, url: str) -> str | None:
 
 def refresh_due(client: httpx.Client) -> int:
     """Re-check products that someone is watching and nobody has seen recently. Returns products refreshed."""
-    stale = now() - REFRESH_EVERY
+    stale, t = now() - REFRESH_EVERY, now()
     with Session.begin() as db:
-        # Unconfirmed alert-crossing prices first, then watched products not attempted recently. checked_at moves on
-        # every attempt, so captcha'd pages don't sit at the front of the queue forever.
-        due = db.scalars(select(Product).join(Watch, Watch.product_fk == Product.id)
-                         .where(Product.needs_check | ((Watch.triggered_at.is_(None) | (Watch.mode == "any"))
-                                                       & (Product.updated_at < stale)
-                                                       & (Product.checked_at.is_(None) | (Product.checked_at < stale))))
-                         .distinct().order_by(Product.needs_check.desc(), Product.checked_at.asc().nulls_first())
-                         .limit(MAX_PER_CYCLE)).all()
+        # Unconfirmed crowd prices expire after a day; until then they are re-checked first, at most every 30 min
+        # and at most 50 per cycle, so a flood of fake low prices can't starve the regular refresh queue.
+        db.execute(update(Product).where(Product.needs_check, Product.updated_at < t - timedelta(hours=24)).values(needs_check=False))
+        urgent = db.scalars(select(Product).where(Product.needs_check, Product.checked_at.is_(None) | (Product.checked_at < t - timedelta(minutes=30)))
+                            .order_by(Product.checked_at.asc().nulls_first()).limit(min(50, MAX_PER_CYCLE))).all()
+        # Then watched products not attempted recently. checked_at moves on every attempt, so captcha'd pages don't
+        # sit at the front of the queue forever.
+        regular = db.scalars(select(Product).join(Watch, Watch.product_fk == Product.id)
+                             .where((Watch.triggered_at.is_(None) | (Watch.mode == "any")), Product.updated_at < stale,
+                                    Product.checked_at.is_(None) | (Product.checked_at < stale))
+                             .distinct().order_by(Product.checked_at.asc().nulls_first())
+                             .limit(MAX_PER_CYCLE - len(urgent))).all()
+        due = list({p.id: p for p in [*urgent, *regular]}.values())
         targets = [(p.id, p.store, p.url) for p in due]
         for p in due:
             p.checked_at = now()

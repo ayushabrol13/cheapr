@@ -1,5 +1,6 @@
 import hashlib
 import html
+import ipaddress
 import json
 from contextlib import asynccontextmanager
 import logging
@@ -68,9 +69,7 @@ _hits: dict[tuple[str, str], deque] = defaultdict(deque)
 async def rate_limit(request: Request, call_next):
     limit = LIMITS.get(request.method)
     if limit and request.url.path.startswith("/api/"):
-        ip = request.client.host if request.client else "?"
-        if os.environ.get("TRUST_PROXY") and request.headers.get("x-forwarded-for"):
-            ip = request.headers["x-forwarded-for"].split(",")[-1].strip()  # right-most = added by our proxy, not the client
+        ip = client_ip(request)  # right-most X-Forwarded-For entry when TRUST_PROXY: added by our proxy
         t = time.monotonic()
         if len(_hits) > 50_000:  # bound memory under key churn: drop idle keys before touching ours
             for k in [k for k, v in _hits.items() if not v or t - v[-1] > 60]:
@@ -133,20 +132,42 @@ def host_ok(store: str, url: str) -> bool:
 
 
 def safe_image(store: str, url: str) -> str:
-    u = urlparse(url or "")
+    """Store-CDN https image, re-serialised from the validated parts (no parser differentials)."""
+    url = url or ""
+    u = urlparse(url)
+    if u.scheme != "https" or u.username or u.password or u.port or "\\" in url or any(ord(ch) < 33 for ch in url):
+        return ""
     host = (u.hostname or "").lower()
-    ok = u.scheme == "https" and any(host == h or host.endswith("." + h) for h in IMAGE_HOSTS.get(store, ()))
-    return url if ok else ""
+    if not any(host == h or host.endswith("." + h) for h in IMAGE_HOSTS.get(store, ())):
+        return ""
+    return f"https://{host}{u.path}" + (f"?{u.query}" if u.query else "")
 
 
 def find_product(db, store: str, product_id: str) -> Product | None:
     return db.scalar(select(Product).where(Product.store == store, Product.product_id == product_id))
 
 
-def source_of(client_id: str | None, request: Request) -> str:
-    """Stable anonymous source tag: hashed install id, else hashed IP. Never stored raw."""
-    raw = client_id or ("ip:" + (request.client.host if request.client else "?"))
-    return hashlib.sha256(raw.encode()).hexdigest()[:16]
+def client_ip(request: Request) -> str:
+    ip = request.client.host if request.client else "?"
+    if os.environ.get("TRUST_PROXY") and request.headers.get("x-forwarded-for"):
+        ip = request.headers["x-forwarded-for"].split(",")[-1].strip()
+    return ip
+
+
+def digest(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()[:16]
+
+
+def source_of(client_id: str | None, request: Request) -> tuple[str, str]:
+    """(source, net): hashed install id (else IP) and hashed network. Install ids are self-chosen, so confirmations
+    must also come from a different network (/24 IPv4, /48 IPv6) to count as independent. Never stored raw."""
+    ip = client_ip(request)
+    try:
+        addr = ipaddress.ip_address(ip)
+        net = str(ipaddress.ip_network(f"{ip}/{24 if addr.version == 4 else 48}", strict=False))
+    except ValueError:
+        net = ip
+    return digest(client_id or "ip:" + ip), digest("net:" + net)
 
 
 @app.post("/api/v1/observations")
@@ -162,7 +183,8 @@ def observe(o: Observation, request: Request, bg: BackgroundTasks, db=Depends(ge
     # Title/image are kept from the first sighting: a later client can't rewrite what alerts and the popup show.
     p.title = p.title or clean(o.title, 512)
     p.image = p.image or safe_image(o.store, o.image)
-    result = record_price(db, p, o.price, o.mrp, o.in_stock, source_of(o.client_id, request))
+    source, net = source_of(o.client_id, request)
+    result = record_price(db, p, o.price, o.mrp, o.in_stock, source, net)
     for alert in result["alerts"]:
         bg.add_task(send_alert, alert)
     return {"ok": True, "accepted": result["accepted"]}
@@ -172,7 +194,7 @@ SOURCE_GAP = timedelta(hours=1)  # one counted observation per source per produc
 CONFIRM_WINDOW = timedelta(hours=24)
 
 
-def record_price(db, p: Product, price: float, mrp: float | None, in_stock: bool, source: str) -> dict:
+def record_price(db, p: Product, price: float, mrp: float | None, in_stock: bool, source: str, net: str = "") -> dict:
     """Store a price point and fire watches; shared by the API (crowd) and the worker (source="worker").
 
     Crowd input is untrusted: prices outside the sanity band are held as suspect until a second, different source
@@ -187,17 +209,18 @@ def record_price(db, p: Product, price: float, mrp: float | None, in_stock: bool
     in_band = p.last_price * MAX_SWING[0] <= price <= p.last_price * MAX_SWING[1]
     if not in_band:
         agree = db.scalars(select(Price).where(Price.product_fk == p.id, Price.suspect.is_(True), Price.source != source,
+                                               Price.net != net,
                                                Price.observed_at >= t - CONFIRM_WINDOW,
                                                Price.price.between(price * 0.95, price * 1.05))).all()
         if not (trusted or agree):
-            db.add(Price(product_fk=p.id, price=price, mrp=mrp, in_stock=in_stock, source=source, suspect=True, observed_at=t))
+            db.add(Price(product_fk=p.id, price=price, mrp=mrp, in_stock=in_stock, source=source, net=net, suspect=True, observed_at=t))
             return {"accepted": False, "alerts": []}
         for row in agree:
             row.suspect = False
     last = db.scalar(select(Price).where(Price.product_fk == p.id, Price.suspect.is_(False))
                      .order_by(Price.observed_at.desc()).limit(1))
     if not (last and last.price == price and last.in_stock == in_stock and t - last.observed_at < DEDUPE_WINDOW):
-        db.add(Price(product_fk=p.id, price=price, mrp=mrp, in_stock=in_stock, source=source, observed_at=t))
+        db.add(Price(product_fk=p.id, price=price, mrp=mrp, in_stock=in_stock, source=source, net=net, observed_at=t))
     p.last_price, p.updated_at = price, t
     if not in_stock:
         return {"accepted": True, "alerts": []}
@@ -209,7 +232,8 @@ def record_price(db, p: Product, price: float, mrp: float | None, in_stock: bool
     if not crossing:
         return {"accepted": True, "alerts": []}
     confirmed = db.scalar(select(Price.id).where(Price.product_fk == p.id, Price.suspect.is_(False), Price.source != source,
-                                                 Price.source != "", Price.observed_at >= t - CONFIRM_WINDOW,
+                                                 Price.source != "", (Price.net != net) | (Price.source == "worker"),
+                                                 Price.observed_at >= t - CONFIRM_WINDOW,
                                                  Price.price <= price * 1.02).limit(1))
     if confirmed:
         return {"accepted": True, "alerts": trigger_watches(db, p)}
@@ -221,16 +245,20 @@ def find_consent(db, client_id: str, email: str) -> EmailAddress | None:
     return db.scalar(select(EmailAddress).where(EmailAddress.client_id == client_id, EmailAddress.email == email.lower()))
 
 
+def mail_key(email: str) -> str:
+    return hashlib.sha256(email.lower().encode()).hexdigest()
+
+
 def lock_address(db, email: str) -> None:
     """Serialise budget checks for one address: upsert its lock row, then row-lock it (FOR UPDATE on Postgres;
     SQLite serialises writers anyway). Callers lock several addresses in sorted order to avoid deadlocks."""
     ins = pg_insert if db.bind.dialect.name == "postgresql" else sqlite_insert
-    db.execute(ins(EmailThrottle).values(email=email).on_conflict_do_nothing())
-    db.execute(select(EmailThrottle).where(EmailThrottle.email == email).with_for_update())
+    db.execute(ins(EmailThrottle).values(email=mail_key(email)).on_conflict_do_nothing())
+    db.execute(select(EmailThrottle).where(EmailThrottle.email == mail_key(email)).with_for_update())
 
 
 def sends_since(db, email: str, kind: str, since: datetime, client_id: str | None = None) -> int:
-    q = select(func.count(EmailSend.id)).where(EmailSend.email == email, EmailSend.kind == kind, EmailSend.sent_at >= since)
+    q = select(func.count(EmailSend.id)).where(EmailSend.email == mail_key(email), EmailSend.kind == kind, EmailSend.sent_at >= since)
     if client_id:
         q = q.where(EmailSend.client_id == client_id)
     return db.scalar(q) or 0
@@ -241,7 +269,7 @@ def take_alert_slot(db, client_id: str, email: str) -> bool:
     lock_address(db, email)
     if sends_since(db, email, "alert", now() - timedelta(days=1)) >= ALERTS_PER_DAY:
         return False
-    db.add(EmailSend(email=email, client_id=client_id, kind="alert", sent_at=now()))
+    db.add(EmailSend(email=mail_key(email), client_id=client_id, kind="alert", sent_at=now()))
     return True
 
 
@@ -253,7 +281,7 @@ def take_verify_slot(db, client_id: str, email: str) -> bool:
     t, (gap, per_day) = now(), VERIFY_PER_ADDRESS
     if sends_since(db, email, "verify", t - gap) or sends_since(db, email, "verify", t - timedelta(days=1)) >= per_day:
         return False
-    db.add(EmailSend(email=email, client_id=client_id, kind="verify", sent_at=t))
+    db.add(EmailSend(email=mail_key(email), client_id=client_id, kind="verify", sent_at=t))
     return True
 
 
@@ -388,6 +416,9 @@ def delete_client(client_id: str, db=Depends(get_db)):
         raise HTTPException(422, "bad client id")
     for model in (Watch, EmailAddress, TelegramLink):
         db.execute(delete(model).where(model.client_id == client_id))
+    # Keep anonymous counts (mail throttling, coupon scores) but cut the link to this install.
+    db.execute(update(EmailSend).where(EmailSend.client_id == client_id).values(client_id=""))
+    db.execute(update(CouponReport).where(CouponReport.client_id == client_id).values(client_id=""))
     return {"ok": True}
 
 
