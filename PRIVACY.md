@@ -17,7 +17,9 @@ Cheapr has one purpose: helping you pay less on Indian shopping sites. It collec
 
 The **random install ID** is generated on your device and is used only for your alerts, email confirmation and Telegram link. It is not tied to your name, Google account, or browsing.
 
-**Price reports** carry a *different* random ID that rotates every day and is never sent with alerts, email or Telegram, so the server can't link the products you browse to you. The server stores only a hash of it, plus a hash of your network (for example, the first three parts of an IPv4 address), to stop one person from faking many reports.
+**Price reports** carry a *different* random ID that rotates every day (background re-checks use a fresh one each time) and is never sent with alerts, email or Telegram. Setting an alert sends the product details with the alert itself, not as a separate report. The server stores only a hash of the report ID, plus a hash of your network (for example, the first three parts of an IPv4 address), to stop one person from faking many reports.
+
+Like any website, the server sees the IP address each request comes from. Cheapr does not store raw IP addresses, but a server operator could in principle correlate requests by IP at the moment they arrive. This is the limit of what an extension can promise.
 
 **Coupon learning:** if anonymous sharing is on and you apply a code yourself on one of the 20 supported stores, Cheapr reports whether it lowered your total. Codes learned this way are shown to others only after several different people confirm them.
 

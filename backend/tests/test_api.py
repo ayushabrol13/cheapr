@@ -200,3 +200,13 @@ def test_bulk_import_is_charged_per_item(c, monkeypatch):
     r = c.post("/api/v1/watches/bulk", json={"client_id": str(uuid.uuid4()), "items": items})
     assert r.status_code == 429
     m._hits.clear()
+
+
+def test_watch_can_create_unseen_product_in_one_request(c):
+    cid = str(uuid.uuid4())
+    body = {"client_id": cid, "store": "amazon", "product_id": "B0ONEREQ01", "target_price": 400}
+    assert c.post("/api/v1/watches", json=body).status_code == 404  # no details, unknown product
+    r = c.post("/api/v1/watches", json={**body, "url": "https://www.amazon.in/dp/B0ONEREQ01", "title": "X", "price": 500})
+    assert r.status_code == 200 and r.json()["price"] == 500
+    bad = {**body, "product_id": "B0ONEREQ02", "url": "https://evil.example/dp/B0ONEREQ02", "price": 500}
+    assert c.post("/api/v1/watches", json=bad).status_code == 404

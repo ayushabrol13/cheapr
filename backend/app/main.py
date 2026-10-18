@@ -378,6 +378,12 @@ class WatchIn(BaseModel):
     target_price: float = Field(gt=0, lt=1e8)
     mode: str = Field("target", pattern="^(target|any)$")
     email: str | None = Field(None, pattern=EMAIL, max_length=320)
+    # Optional product details: lets the extension create an alert for a never-seen product in one request,
+    # instead of a separate price report that would link its anonymous report id to this install.
+    url: str | None = Field(None, max_length=2048)
+    title: str = Field("", max_length=512)
+    image: str = Field("", max_length=2048)
+    price: float | None = Field(None, gt=0, lt=1e8)
 
 
 def watch_out(w: Watch, p: Product) -> dict:
@@ -388,10 +394,16 @@ def watch_out(w: Watch, p: Product) -> dict:
 
 
 @app.post("/api/v1/watches")
-def add_watch(body: WatchIn, bg: BackgroundTasks, db=Depends(get_db)):
+def add_watch(body: WatchIn, request: Request, bg: BackgroundTasks, db=Depends(get_db)):
     p = find_product(db, body.store, body.product_id)
     if p is None:
-        raise HTTPException(404, "product not seen yet; open its page first")
+        if not (body.url and body.price and host_ok(body.store, body.url)):
+            raise HTTPException(404, "product not seen yet; open its page first")
+        p = Product(store=body.store, product_id=body.product_id, url=body.url, last_price=body.price,
+                    title=clean(body.title, 512), image=safe_image(body.store, body.image))
+        db.add(p)
+        db.flush()
+        record_price(db, p, body.price, None, True, *source_of(body.client_id, request))
     w = db.scalar(select(Watch).where(Watch.client_id == body.client_id, Watch.product_fk == p.id))
     if w is None:
         w = Watch(client_id=body.client_id, product_fk=p.id, target_price=body.target_price)
