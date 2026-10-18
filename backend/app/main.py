@@ -13,11 +13,12 @@ from urllib.parse import unquote_plus, urlparse
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import case, func, select
+from sqlalchemy import case, func, select, update
+from sqlalchemy.exc import IntegrityError
 
 from .insights import Point, analyze
 from .alerts import send_alert, send_verification
-from .models import Base, Coupon, CouponReport, Price, Product, Session, TelegramLink, Watch, EmailAddress, engine, now
+from .models import Base, Coupon, CouponReport, Price, Product, Session, TelegramLink, Watch, EmailAddress, EmailThrottle, engine, now
 
 log = logging.getLogger("cheapr")
 
@@ -138,20 +139,42 @@ def find_consent(db, client_id: str, email: str) -> EmailAddress | None:
     return db.scalar(select(EmailAddress).where(EmailAddress.client_id == client_id, EmailAddress.email == email.lower()))
 
 
+def throttle_row(db, email: str) -> None:
+    if db.get(EmailThrottle, email) is None:
+        try:
+            with db.begin_nested():
+                db.add(EmailThrottle(email=email))
+        except IntegrityError:
+            pass  # another request created it first
+
+
+def take_alert_slot(db, email: str) -> bool:
+    """Atomically count one alert against the address's daily cap; False when the cap is reached."""
+    throttle_row(db, email)
+    today, T = now().date().isoformat(), EmailThrottle
+    res = db.execute(update(T).where(T.email == email, (T.alert_day != today) | (T.alert_count < EMAILS_PER_DAY))
+                     .values(alert_count=case((T.alert_day != today, 1), else_=T.alert_count + 1), alert_day=today))
+    return res.rowcount == 1
+
+
+def take_verify_slot(db, email: str) -> bool:
+    """Atomically reserve a confirmation mail: max 1/hour and 3/day per address, whatever install asks."""
+    throttle_row(db, email)
+    t, T = now(), EmailThrottle
+    fresh_window = T.verify_window_start < t - timedelta(days=1)
+    res = db.execute(update(T).where(T.email == email,
+                                     T.last_verify_at.is_(None) | (T.last_verify_at < t - timedelta(hours=1)),
+                                     fresh_window | (T.verify_count < 3))
+                     .values(verify_count=case((fresh_window, 1), else_=T.verify_count + 1),
+                             verify_window_start=case((fresh_window, t), else_=T.verify_window_start),
+                             last_verify_at=t))
+    return res.rowcount == 1
+
+
 def email_allowed(db, client_id: str, email: str) -> bool:
-    """This install confirmed this address (double opt-in) and it's under today's cap; counts this send."""
+    """This install confirmed this address (double opt-in) and the address is under today's cap."""
     e = find_consent(db, client_id, email)
-    if not e or not e.verified_at:
-        return False
-    today = now().date().isoformat()
-    if e.sent_day != today:
-        e.sent_day, e.sent_count = today, 0
-    sent_to_address = db.scalar(select(func.coalesce(func.sum(EmailAddress.sent_count), 0))
-                                .where(EmailAddress.email == e.email, EmailAddress.sent_day == today))
-    if sent_to_address >= EMAILS_PER_DAY:  # cap is per address, across every install that uses it
-        return False
-    e.sent_count += 1
-    return True
+    return bool(e and e.verified_at) and take_alert_slot(db, e.email)
 
 
 def request_verification(db, client_id: str, email: str, bg: BackgroundTasks) -> None:
@@ -161,13 +184,9 @@ def request_verification(db, client_id: str, email: str, bg: BackgroundTasks) ->
         e = EmailAddress(client_id=client_id, email=email, token=secrets.token_urlsafe(32))
         db.add(e)
     base = os.environ.get("PUBLIC_URL", "http://localhost:8000").rstrip("/")
-    # Throttle per address, not per install: fresh client IDs must not unlock more mail to the same inbox.
-    last_mail = db.scalar(select(func.max(EmailAddress.verify_sent_at)).where(EmailAddress.email == email))
-    mails_today = db.scalar(select(func.count(EmailAddress.id)).where(
-        EmailAddress.email == email, EmailAddress.verify_sent_at >= now() - timedelta(days=1)))
-    if (not e.verified_at and os.environ.get("SMTP_HOST") and mails_today < 3
-            and (not last_mail or now() - last_mail > timedelta(hours=1))):
-        e.verify_sent_at, e.token = now(), secrets.token_urlsafe(32)  # fresh token per mail; max one mail an hour
+    # Known limit: a stranger can spend an address's hourly slot first, delaying (not blocking) the real owner.
+    if not e.verified_at and os.environ.get("SMTP_HOST") and take_verify_slot(db, email):
+        e.verify_sent_at, e.token = now(), secrets.token_urlsafe(32)  # fresh token per mail
         bg.add_task(send_verification, email, f"{base}/api/v1/email/verify?token={e.token}")
 
 

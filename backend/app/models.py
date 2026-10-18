@@ -96,5 +96,14 @@ class EmailAddress(Base):
     token: Mapped[str] = mapped_column(String(64), unique=True)
     verified_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     verify_sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    sent_day: Mapped[str] = mapped_column(String(10), default="")
-    sent_count: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class EmailThrottle(Base):
+    """One row per address: mail budgets enforced with atomic conditional UPDATEs (no check-then-act races)."""
+    __tablename__ = "email_throttle"
+    email: Mapped[str] = mapped_column(String(320), primary_key=True)
+    verify_window_start: Mapped[datetime] = mapped_column(DateTime, default=now)
+    verify_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_verify_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    alert_day: Mapped[str] = mapped_column(String(10), default="")
+    alert_count: Mapped[int] = mapped_column(Integer, default=0)

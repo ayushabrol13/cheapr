@@ -119,3 +119,11 @@ def test_verification_mail_throttled_per_address_across_installs(c, monkeypatch)
         c.post("/api/v1/watches", json={"client_id": str(uuid.uuid4()), "store": "amazon", "product_id": "B0BOMB0001",
                                         "target_price": 400, "email": "victim@example.com"})
     assert sent == ["victim@example.com"]
+
+
+def test_address_budgets_are_atomic_counters(c):
+    import app.main as m
+    with Session.begin() as db:
+        assert [m.take_alert_slot(db, "cap@example.com") for _ in range(m.EMAILS_PER_DAY + 1)][-2:] == [True, False]
+        assert m.take_verify_slot(db, "cap@example.com") is True
+        assert m.take_verify_slot(db, "cap@example.com") is False  # within the hour
