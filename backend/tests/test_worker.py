@@ -67,11 +67,14 @@ def test_email_alerts_need_double_opt_in(c, monkeypatch):
     obs = {"store": "amazon", "product_id": "B0OPTIN001", "url": "https://www.amazon.in/dp/B0OPTIN001", "title": "X", "price": 1000}
     c.post("/api/v1/observations", json=obs)
     c.post("/api/v1/watches", json={"client_id": cid, "store": "amazon", "product_id": "B0OPTIN001", "target_price": 950, "email": email})
-    assert sent and c.get("/api/v1/email/status", params={"email": email}).json()["verified"] is False
-    with Session.begin() as db:
-        assert m.trigger_watches(db, db.scalar(select(Product).where(Product.product_id == "B0OPTIN001"))) == []
-    assert c.get("/api/v1/email/verify", params={"token": sent[0].split("token=")[1]}).status_code == 200
-    assert c.get("/api/v1/email/status", params={"email": email}).json()["verified"] is True
+    status = lambda: c.get("/api/v1/email/status", params={"client_id": cid, "email": email}).json()["verified"]  # noqa: E731
+    assert sent and status() is False
+    token = sent[0].split("token=")[1]
+    assert c.get("/api/v1/email/verify", params={"token": token}).status_code == 200 and status() is False  # GET never confirms
+    assert c.post("/api/v1/email/verify", data={"token": token}).status_code == 200 and status() is True
+    assert c.post("/api/v1/email/verify", data={"token": token}).status_code == 404  # single use
+    other = str(uuid.uuid4())  # another install reusing the confirmed address gets no email
+    assert c.get("/api/v1/email/status", params={"client_id": other, "email": email}).json()["verified"] is False
     alerts = []
     monkeypatch.setattr(m, "send_alert", alerts.append)
     c.post("/api/v1/observations", json={**obs, "price": 940})

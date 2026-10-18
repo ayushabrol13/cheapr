@@ -1,3 +1,4 @@
+import html
 import json
 from contextlib import asynccontextmanager
 import logging
@@ -7,7 +8,7 @@ import time
 from collections import defaultdict, deque
 from datetime import datetime, timedelta
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import unquote_plus, urlparse
 
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
@@ -133,9 +134,13 @@ def record_price(db, p: Product, price: float, mrp: float | None, in_stock: bool
     return trigger_watches(db, p) if in_stock else []
 
 
-def email_allowed(db, email: str) -> bool:
-    """Verified (double opt-in) and under today's cap; counts this send."""
-    e = db.scalar(select(EmailAddress).where(EmailAddress.email == email.lower()))
+def find_consent(db, client_id: str, email: str) -> EmailAddress | None:
+    return db.scalar(select(EmailAddress).where(EmailAddress.client_id == client_id, EmailAddress.email == email.lower()))
+
+
+def email_allowed(db, client_id: str, email: str) -> bool:
+    """This install confirmed this address (double opt-in) and it's under today's cap; counts this send."""
+    e = find_consent(db, client_id, email)
     if not e or not e.verified_at:
         return False
     today = now().date().isoformat()
@@ -147,15 +152,15 @@ def email_allowed(db, email: str) -> bool:
     return True
 
 
-def request_verification(db, email: str, bg: BackgroundTasks) -> None:
+def request_verification(db, client_id: str, email: str, bg: BackgroundTasks) -> None:
     email = email.lower()
-    e = db.scalar(select(EmailAddress).where(EmailAddress.email == email))
+    e = find_consent(db, client_id, email)
     if e is None:
-        e = EmailAddress(email=email, token=secrets.token_urlsafe(32))
+        e = EmailAddress(client_id=client_id, email=email, token=secrets.token_urlsafe(32))
         db.add(e)
     base = os.environ.get("PUBLIC_URL", "http://localhost:8000").rstrip("/")
     if not e.verified_at and os.environ.get("SMTP_HOST") and (not e.verify_sent_at or now() - e.verify_sent_at > timedelta(hours=1)):
-        e.verify_sent_at = now()  # at most one confirmation mail per address per hour
+        e.verify_sent_at, e.token = now(), secrets.token_urlsafe(32)  # fresh token per mail; max one mail an hour
         bg.add_task(send_verification, email, f"{base}/api/v1/email/verify?token={e.token}")
 
 
@@ -167,7 +172,7 @@ def trigger_watches(db, p: Product) -> list[dict]:
         w.triggered_at, w.triggered_price = now(), p.last_price
         link = db.scalar(select(TelegramLink).where(TelegramLink.client_id == w.client_id, TelegramLink.chat_id.is_not(None)))
         alerts.append({"title": p.title, "url": p.url, "price": p.last_price, "target": w.target_price,
-                       "email": w.email if w.email and email_allowed(db, w.email) else None,
+                       "email": w.email if w.email and email_allowed(db, w.client_id, w.email) else None,
                        "chat_id": link.chat_id if link else None})
     return alerts
 
@@ -220,7 +225,7 @@ def add_watch(body: WatchIn, bg: BackgroundTasks, db=Depends(get_db)):
     db.flush()
     trigger_watches(db, p)  # already below target: flag it, but never send alerts on save (spam relay)
     if body.email:
-        request_verification(db, body.email, bg)
+        request_verification(db, body.client_id, body.email, bg)
     return watch_out(w, p)
 
 
@@ -240,19 +245,44 @@ def delete_watch(watch_id: int, client_id: str, db=Depends(get_db)):
     return {"ok": True}
 
 
-@app.get("/api/v1/email/verify", response_class=HTMLResponse)
-def verify_email(token: str = Query(max_length=64), db=Depends(get_db)):
+VERIFY_TTL = timedelta(hours=48)
+PAGE = ("<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width'><title>Cheapr</title>"
+        "<body style='font:16px system-ui;text-align:center;margin-top:18vh;padding:0 16px'>{}</body>")
+
+
+def pending_consent(db, token: str) -> EmailAddress | None:
     e = db.scalar(select(EmailAddress).where(EmailAddress.token == token))
-    if e is None:
-        return HTMLResponse("<h1>Link expired or invalid</h1>", status_code=404)
-    e.verified_at = e.verified_at or now()
-    return "<!doctype html><meta charset=utf-8><title>Cheapr</title><body style='font:16px system-ui;text-align:center;margin-top:20vh'>" \
-           "<h1>Email confirmed ✓</h1><p>Cheapr will email you when a watched price drops.</p>"
+    if e is None or e.verified_at or not e.verify_sent_at or now() - e.verify_sent_at > VERIFY_TTL:
+        return None
+    return e
+
+
+@app.get("/api/v1/email/verify", response_class=HTMLResponse)
+def verify_email_page(token: str = Query(max_length=64), db=Depends(get_db)):
+    # GET only shows a button: mail scanners that prefetch links must not confirm on the user's behalf.
+    if pending_consent(db, token) is None:
+        return HTMLResponse(PAGE.format("<h1>This link has expired or was already used</h1>"), status_code=404)
+    return PAGE.format("<h1>Get Cheapr price alerts by email?</h1>"
+                       f"<form method=post><input type=hidden name=token value='{html.escape(token, quote=True)}'>"
+                       "<button style='font:600 16px system-ui;padding:12px 24px;border:0;border-radius:10px;background:#6941c6;color:#fff;cursor:pointer'>"
+                       "Yes, send me alerts</button></form>")
+
+
+@app.post("/api/v1/email/verify", response_class=HTMLResponse)
+async def verify_email(request: Request):
+    form = (await request.body()).decode()[:200]
+    token = dict(p.split("=", 1) for p in form.split("&") if "=" in p).get("token", "")
+    with Session.begin() as db:
+        e = pending_consent(db, unquote_plus(token))
+        if e is None:
+            return HTMLResponse(PAGE.format("<h1>This link has expired or was already used</h1>"), status_code=404)
+        e.verified_at, e.token = now(), secrets.token_urlsafe(32)  # single use
+    return PAGE.format("<h1>Email confirmed ✓</h1><p>Cheapr will email you when a watched price drops.</p>")
 
 
 @app.get("/api/v1/email/status")
-def email_status(email: str = Query(pattern=EMAIL, max_length=320), db=Depends(get_db)):
-    e = db.scalar(select(EmailAddress).where(EmailAddress.email == email.lower()))
+def email_status(client_id: str = Query(pattern=UUID), email: str = Query(pattern=EMAIL, max_length=320), db=Depends(get_db)):
+    e = find_consent(db, client_id, email)  # scoped to the asking install: no lookup oracle for other addresses
     return {"verified": bool(e and e.verified_at), "available": bool(os.environ.get("SMTP_HOST"))}
 
 

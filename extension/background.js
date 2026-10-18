@@ -84,7 +84,7 @@ const handlers = {
   settings,
   async emailStatus() {
     const { email } = await settings();
-    return email ? api("/api/v1/email/status", { query: { email } }) : { verified: false, available: false };
+    return email ? api("/api/v1/email/status", { query: { client_id: await clientId(), email } }) : { verified: false, available: false };
   },
   async telegram({ action }) {
     const client_id = await clientId();

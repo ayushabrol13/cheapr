@@ -87,10 +87,12 @@ class TelegramLink(Base):
 
 
 class EmailAddress(Base):
-    """Alert recipients. Alerts go only to verified addresses (double opt-in), capped per day."""
+    """Alert consent per (install, email): an address confirmed by one install doesn't authorise others."""
     __tablename__ = "email_addresses"
+    __table_args__ = (UniqueConstraint("client_id", "email"),)
     id: Mapped[int] = mapped_column(primary_key=True)
-    email: Mapped[str] = mapped_column(String(320), unique=True)
+    client_id: Mapped[str] = mapped_column(String(64), index=True)
+    email: Mapped[str] = mapped_column(String(320), index=True)
     token: Mapped[str] = mapped_column(String(64), unique=True)
     verified_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     verify_sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
