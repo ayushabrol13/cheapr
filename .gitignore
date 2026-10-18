@@ -1,4 +1,4 @@
-node_modules/
 .DS_Store
 docs/research.md
 extension/dev/
+node_modules/

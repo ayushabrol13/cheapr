@@ -8,7 +8,7 @@ os.environ["ADMIN_TOKEN"] = "secret"
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
-from app.main import app, verdict  # noqa: E402
+from app.main import app  # noqa: E402
 
 CID = str(uuid.uuid4())
 OBS = {"store": "amazon", "product_id": "B0TEST0001", "url": "https://www.amazon.in/dp/B0TEST0001",
@@ -31,8 +31,8 @@ def test_history_dedupes_and_tracks_changes(c):
         assert c.post("/api/v1/observations", json={**OBS, "price": price}).status_code == 200
     h = c.get("/api/v1/products/amazon/B0TEST0001/history").json()
     assert [p["price"] for p in h["points"]] == [1000, 900, 950]  # repeated 1000 deduped
-    assert h["stats"] == {"min": 900, "max": 1000, "avg": 950.0, "count": 3}
-    assert h["verdict"] == "fair"
+    assert h["stats"]["low"] == 900 and h["stats"]["high"] == 1000 and h["stats"]["current"] == 950
+    assert h["verdict"] == "new"  # all observations are minutes apart: too little history to judge
 
 
 def test_rejects_bad_urls_and_wild_prices(c):
@@ -65,8 +65,10 @@ def test_coupons_rank_by_reports(c):
     assert listed["B2"]["tries"] == 1  # duplicate vote from same client ignored
 
 
-def test_verdict():
-    assert verdict([100, 100]) == "not-enough-data"
-    assert verdict([100, 120, 100]) == "lowest"
-    assert verdict([100, 200, 300, 150]) == "good"
-    assert verdict([100, 100, 100, 130]) == "high"
+def test_rate_limit(c, monkeypatch):
+    import app.main as m
+    monkeypatch.setitem(m.LIMITS, "GET", 3)
+    m._hits.clear()
+    codes = [c.get("/api/v1/coupons", params={"store": "x.in"}).status_code for _ in range(4)]
+    assert codes == [200, 200, 200, 429]
+    m._hits.clear()

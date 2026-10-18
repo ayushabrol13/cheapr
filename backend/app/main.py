@@ -3,15 +3,19 @@ from contextlib import asynccontextmanager
 import logging
 import os
 import smtplib
+import time
+from collections import defaultdict, deque
 from datetime import datetime, timedelta
 from email.message import EmailMessage
 from pathlib import Path
 from urllib.parse import urlparse
 
-from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query
+from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import case, func, select
 
+from .insights import Point, analyze
 from .models import Base, Coupon, CouponReport, Price, Product, Session, Watch, engine, now
 
 log = logging.getLogger("cheapr")
@@ -41,7 +45,27 @@ async def lifespan(_app):
     yield
 
 
-app = FastAPI(title="Cheapr API", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="Cheapr API", version="0.2.0", lifespan=lifespan)
+
+# Per-IP sliding-window limits. shortcut: in-process memory, so limits are per worker; move to Redis when scaling out.
+LIMITS = {"POST": int(os.environ.get("RATE_LIMIT_WRITE", "60")), "DELETE": 60, "GET": int(os.environ.get("RATE_LIMIT_READ", "600"))}
+_hits: dict[tuple[str, str], deque] = defaultdict(deque)
+
+
+@app.middleware("http")
+async def rate_limit(request: Request, call_next):
+    limit = LIMITS.get(request.method)
+    if limit and request.url.path.startswith("/api/"):
+        ip = request.client.host if request.client else "?"
+        if os.environ.get("TRUST_PROXY") and request.headers.get("x-forwarded-for"):
+            ip = request.headers["x-forwarded-for"].split(",")[0].strip()
+        q, t = _hits[(ip, request.method)], time.monotonic()
+        while q and t - q[0] > 60:
+            q.popleft()
+        if len(q) >= limit:
+            return JSONResponse({"detail": "rate limited"}, status_code=429, headers={"Retry-After": "60"})
+        q.append(t)
+    return await call_next(request)
 
 
 def get_db():
@@ -107,35 +131,20 @@ def trigger_watches(db, p: Product, bg: BackgroundTasks | None) -> None:
             bg.add_task(send_email, w.email, p.title, p.url, p.last_price, p.currency)
 
 
-def verdict(prices: list[float]) -> str:
-    if len(prices) < 3:
-        return "not-enough-data"
-    cur, lo, avg = prices[-1], min(prices), sum(prices) / len(prices)
-    if cur <= lo * 1.02:
-        return "lowest"
-    if cur < avg * 0.97:
-        return "good"
-    if cur > avg * 1.05:
-        return "high"
-    return "fair"
-
-
 @app.get("/api/v1/products/{store}/{product_id}/history")
 def history(store: str, product_id: str, days: int = 90, db=Depends(get_db)):
     p = find_product(db, store, product_id)
     if p is None:
         raise HTTPException(404, "unknown product")
-    since = now() - timedelta(days=max(1, min(days, 730)))
-    rows = db.scalars(select(Price).where(Price.product_fk == p.id, Price.observed_at >= since)
+    rows = db.scalars(select(Price).where(Price.product_fk == p.id, Price.observed_at >= now() - timedelta(days=730))
                       .order_by(Price.observed_at)).all()
-    prices = [r.price for r in rows if r.in_stock]
+    mrp = next((r.mrp for r in reversed(rows) if r.mrp), None)
+    result = analyze([Point(r.observed_at, r.price, r.in_stock) for r in rows], mrp, now(), max(7, min(days, 365)))
     return {
         "product": {"store": p.store, "product_id": p.product_id, "title": p.title, "url": p.url,
-                    "image": p.image, "currency": p.currency, "price": p.last_price},
+                    "image": p.image, "currency": p.currency, "price": p.last_price, "mrp": mrp},
         "points": [{"t": r.observed_at.isoformat() + "Z", "price": r.price, "in_stock": r.in_stock} for r in rows],
-        "stats": {"min": min(prices, default=None), "max": max(prices, default=None),
-                  "avg": round(sum(prices) / len(prices), 2) if prices else None, "count": len(rows)},
-        "verdict": verdict(prices),
+        **result,
     }
 
 

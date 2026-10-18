@@ -22,6 +22,7 @@
       id: (u) => u.pathname.match(/\/(\d{5,})\/buy/)?.[1],
       price: [".pdp-price strong"],
       mrp: [".pdp-mrp s"],
+      brand: [".pdp-title"],
       title: [".pdp-name"],
       image: [".image-grid-image"],
       oos: [".size-buttons-out-of-stock"],
@@ -103,7 +104,8 @@
     return {
       store, product_id,
       url: `${url.origin}${url.pathname}${store === "flipkart" ? `?pid=${encodeURIComponent(product_id)}` : ""}`,
-      title: (first(doc, cfg.title, text) || ld?.name || meta(doc, "og:title") || doc.title || "").slice(0, 500),
+      title: [first(doc, cfg.brand || [], text), first(doc, cfg.title, text) || ld?.name || meta(doc, "og:title") || doc.title]
+        .filter(Boolean).join(" ").slice(0, 500),
       image: (first(doc, cfg.image, img) || [].concat(ld?.image || [])[0] || meta(doc, "og:image") || "").slice(0, 2000),
       price,
       mrp: first(doc, cfg.mrp, (el) => parsePrice(text(el))),
