@@ -146,7 +146,9 @@ def email_allowed(db, client_id: str, email: str) -> bool:
     today = now().date().isoformat()
     if e.sent_day != today:
         e.sent_day, e.sent_count = today, 0
-    if e.sent_count >= EMAILS_PER_DAY:
+    sent_to_address = db.scalar(select(func.coalesce(func.sum(EmailAddress.sent_count), 0))
+                                .where(EmailAddress.email == e.email, EmailAddress.sent_day == today))
+    if sent_to_address >= EMAILS_PER_DAY:  # cap is per address, across every install that uses it
         return False
     e.sent_count += 1
     return True
@@ -159,7 +161,12 @@ def request_verification(db, client_id: str, email: str, bg: BackgroundTasks) ->
         e = EmailAddress(client_id=client_id, email=email, token=secrets.token_urlsafe(32))
         db.add(e)
     base = os.environ.get("PUBLIC_URL", "http://localhost:8000").rstrip("/")
-    if not e.verified_at and os.environ.get("SMTP_HOST") and (not e.verify_sent_at or now() - e.verify_sent_at > timedelta(hours=1)):
+    # Throttle per address, not per install: fresh client IDs must not unlock more mail to the same inbox.
+    last_mail = db.scalar(select(func.max(EmailAddress.verify_sent_at)).where(EmailAddress.email == email))
+    mails_today = db.scalar(select(func.count(EmailAddress.id)).where(
+        EmailAddress.email == email, EmailAddress.verify_sent_at >= now() - timedelta(days=1)))
+    if (not e.verified_at and os.environ.get("SMTP_HOST") and mails_today < 3
+            and (not last_mail or now() - last_mail > timedelta(hours=1))):
         e.verify_sent_at, e.token = now(), secrets.token_urlsafe(32)  # fresh token per mail; max one mail an hour
         bg.add_task(send_verification, email, f"{base}/api/v1/email/verify?token={e.token}")
 

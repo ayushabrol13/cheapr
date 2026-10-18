@@ -106,3 +106,16 @@ def test_fetch_refuses_offsite_redirect():
         raise AssertionError("followed an off-site redirect")
     client = httpx.Client(transport=httpx.MockTransport(handler))
     assert worker.fetch_store_page(client, "amazon", "https://www.amazon.in/dp/B0FC2YFSN4") is None
+
+
+def test_verification_mail_throttled_per_address_across_installs(c, monkeypatch):
+    import app.main as m
+    monkeypatch.setenv("SMTP_HOST", "smtp.test")
+    sent = []
+    monkeypatch.setattr(m, "send_verification", lambda email, link: sent.append(email))
+    obs = {"store": "amazon", "product_id": "B0BOMB0001", "url": "https://www.amazon.in/dp/B0BOMB0001", "title": "X", "price": 500}
+    c.post("/api/v1/observations", json=obs)
+    for _ in range(5):  # attacker rotates install IDs
+        c.post("/api/v1/watches", json={"client_id": str(uuid.uuid4()), "store": "amazon", "product_id": "B0BOMB0001",
+                                        "target_price": 400, "email": "victim@example.com"})
+    assert sent == ["victim@example.com"]
