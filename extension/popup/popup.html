@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Cheapr</title>
+<link rel="stylesheet" href="popup.css">
+</head>
+<body>
+<header><img src="../icons/32.png" alt="" width="20" height="20"><b>Cheapr</b></header>
+<nav role="tablist">
+  <button role="tab" aria-selected="true" data-tab="watch">Watchlist</button>
+  <button role="tab" aria-selected="false" data-tab="spend">Spend Lens</button>
+  <button role="tab" aria-selected="false" data-tab="settings">Settings</button>
+</nav>
+<main>
+  <section id="watch" role="tabpanel"><p class="muted">Loading…</p></section>
+  <section id="spend" role="tabpanel" hidden></section>
+  <section id="settings" role="tabpanel" hidden>
+    <form id="settings-form">
+      <label>Backend URL<input name="backend" type="url" required></label>
+      <label>Alert email (optional)<input name="email" type="email" placeholder="you@example.com"></label>
+      <label class="row"><input name="overlay" type="checkbox"> Show price history on product pages</label>
+      <label class="row"><input name="coupons" type="checkbox"> Find coupons at checkout</label>
+      <button>Save</button>
+      <p class="muted" id="settings-status" role="status"></p>
+    </form>
+  </section>
+</main>
+<script src="popup.js"></script>
+</body>
+</html>

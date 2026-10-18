@@ -1,0 +1,22 @@
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: cheapr
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cheapr}
+      POSTGRES_DB: cheapr
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cheapr"]
+      interval: 5s
+      retries: 10
+  api:
+    build: .
+    ports: ["127.0.0.1:8000:8000"]
+    env_file: [{path: .env, required: false}]
+    environment:
+      DATABASE_URL: postgresql+psycopg://cheapr:${POSTGRES_PASSWORD:-cheapr}@db:5432/cheapr
+    depends_on:
+      db: {condition: service_healthy}
+volumes:
+  pgdata:

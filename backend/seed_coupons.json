@@ -1,0 +1,3 @@
+[
+  {"store": "example-shop.com", "code": "WELCOME10", "description": "Sample entry; replace with real codes or add via POST /api/v1/coupons"}
+]
