@@ -15,7 +15,11 @@ Cheapr has one purpose: helping you pay less on Indian shopping sites. It collec
 | You import a wishlist | each item's store, product ID, title, image URL and price, plus your install ID | to create the alerts you asked for |
 | You connect Telegram | your random install ID, which is linked to the chat that pressed Start | to send alerts on Telegram |
 
-The **random install ID** is generated on your device. It is not tied to your name, Google account, or browsing.
+The **random install ID** is generated on your device and is used only for your alerts, email confirmation and Telegram link. It is not tied to your name, Google account, or browsing.
+
+**Price reports** carry a *different* random ID that rotates every day and is never sent with alerts, email or Telegram, so the server can't link the products you browse to you. The server stores only a hash of it, plus a hash of your network (for example, the first three parts of an IPv4 address), to stop one person from faking many reports.
+
+**Coupon learning:** if anonymous sharing is on and you apply a code yourself on one of the 20 supported stores, Cheapr reports whether it lowered your total. Codes learned this way are shown to others only after several different people confirm them.
 
 ## What your browser fetches directly (never sent to us)
 

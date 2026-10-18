@@ -27,6 +27,17 @@ function clientId() {
   return idPromise;
 }
 
+// Price reports use a separate random id, rotated daily and never sent with alerts, email or Telegram: the server
+// can rate-limit and de-duplicate reports without being able to link browsing to an alert owner.
+async function observerId() {
+  const today = new Date().toISOString().slice(0, 10);
+  const { observer } = await chrome.storage.local.get("observer");
+  if (observer?.day === today) return observer.id;
+  const id = crypto.randomUUID();
+  await chrome.storage.local.set({ observer: { id, day: today } });
+  return id;
+}
+
 async function api(path, { method = "GET", body, query } = {}) {
   const { backend } = await settings();
   const url = new URL(path.replace(/^\//, ""), backend.endsWith("/") ? backend : backend + "/"); // keeps a path prefix
@@ -58,7 +69,7 @@ async function setTabState(tabId, state) {
 const handlers = {
   async observe({ product }, sender) {
     if ((await settings()).share) {
-      await api("/api/v1/observations", { method: "POST", body: { ...product, client_id: await clientId() } }).catch(() => {});
+      await api("/api/v1/observations", { method: "POST", body: { ...product, client_id: await observerId() } }).catch(() => {});
     }
     let result;
     try {
@@ -79,7 +90,7 @@ const handlers = {
   async watch({ product, target_price, mode = "target" }) {
     const { email } = await settings();
     // Setting an alert is an explicit request to track this product, so record its price even if sharing is off.
-    await api("/api/v1/observations", { method: "POST", body: { ...product, client_id: await clientId() } }).catch(() => {});
+    await api("/api/v1/observations", { method: "POST", body: { ...product, client_id: await observerId() } }).catch(() => {});
     return api("/api/v1/watches", {
       method: "POST",
       body: { client_id: await clientId(), store: product.store, product_id: product.product_id, target_price, mode, email: email || null },
@@ -151,7 +162,7 @@ const handlers = {
     if (existing.length) await chrome.scripting.unregisterContentScripts({ ids: [id] });
     if (enabled && (await chrome.permissions.contains({ origins: ["https://*/*"] }))) {
       await chrome.scripting.registerContentScripts([{
-        id, js: ["lib/i18n.js", "lib/format.js", "content/coupons.js"], matches: ["https://*/*"], excludeMatches: SENSITIVE, runAt: "document_idle",
+        id, js: ["content/all-sites-flag.js", "lib/i18n.js", "lib/format.js", "content/coupons.js"], matches: ["https://*/*"], excludeMatches: SENSITIVE, runAt: "document_idle",
       }]);
     }
     return { enabled: enabled && (await chrome.scripting.getRegisteredContentScripts({ ids: [id] })).length > 0 };
@@ -235,12 +246,11 @@ async function refreshWatched() {
   const pending = (await handlers.watches()).filter((w) => !w.triggered_at || w.mode === "any");
   if (!pending.length) return;
   await ensureOffscreen();
-  const client_id = await clientId();
   for (const w of pending.slice(0, 40)) {
     try {
       const res = await fetch(w.url, { credentials: "omit", signal: AbortSignal.timeout(TIMEOUT_MS) });
       const product = res.ok && (await chrome.runtime.sendMessage({ target: "offscreen", html: await res.text(), url: w.url }));
-      if (product) await api("/api/v1/observations", { method: "POST", body: { ...product, client_id } });
+      if (product) await api("/api/v1/observations", { method: "POST", body: { ...product, client_id: await observerId() } });
     } catch (e) {
       console.warn("refresh failed", w.url, e.message);
     }

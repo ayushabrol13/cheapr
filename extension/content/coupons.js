@@ -101,8 +101,11 @@
   }
 
   // Learn from the shopper: watch their own apply clicks and report codes that lowered the total.
-  function learnFromShopper(input) {
-    if (input.__cheaprLearn) return;
+  // Only with the anonymous-sharing opt-in, and only on the curated stores (never via the all-sites grant).
+  async function learnFromShopper(input) {
+    if (input.__cheaprLearn || window.__cheaprAllSites) return;
+    const { share } = await chrome.storage.sync.get({ share: false });
+    if (!share) return;
     input.__cheaprLearn = true;
     couponBox(input).addEventListener("click", async (e) => {
       if (!e.isTrusted || !e.target.closest('button, [role="button"], input[type="submit"]')) return; // real user clicks only
