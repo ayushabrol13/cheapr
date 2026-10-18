@@ -104,7 +104,7 @@ async function overview(view) {
     el("div", { className: "cards" },
       card("Products tracked", s.products, `${s.products_7d} new this week`),
       card("Price points", s.prices, `${s.prices_24h} in last 24h`),
-      card("Active watches", s.watches, `${s.clients} clients`),
+      card("Active watches", s.watches, `${s.clients} client${s.clients === 1 ? "" : "s"}`),
       card("Alerts fired", s.alerts_7d, "last 7 days"),
       card("Coupons", s.coupons, `${s.coupons_user} user-submitted`),
       card("Coupon reports", s.reports, `${Math.round(s.report_success * 100)}% worked`)),

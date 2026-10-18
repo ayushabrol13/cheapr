@@ -56,3 +56,50 @@ def test_worker_refresh_records_price_and_fires_alert(c, monkeypatch):
     assert alerts and alerts[0]["price"] == 867 and alerts[0]["target"] == 900
     with Session() as db:
         assert db.scalar(select(Product).where(Product.product_id == "B0FC2YFSN4")).last_price == 867
+
+
+def test_email_alerts_need_double_opt_in(c, monkeypatch):
+    import app.main as m
+    monkeypatch.setenv("SMTP_HOST", "smtp.test")
+    sent = []
+    monkeypatch.setattr(m, "send_verification", lambda email, link: sent.append(link))
+    cid, email = str(uuid.uuid4()), "shopper@example.com"
+    obs = {"store": "amazon", "product_id": "B0OPTIN001", "url": "https://www.amazon.in/dp/B0OPTIN001", "title": "X", "price": 1000}
+    c.post("/api/v1/observations", json=obs)
+    c.post("/api/v1/watches", json={"client_id": cid, "store": "amazon", "product_id": "B0OPTIN001", "target_price": 950, "email": email})
+    assert sent and c.get("/api/v1/email/status", params={"email": email}).json()["verified"] is False
+    with Session.begin() as db:
+        assert m.trigger_watches(db, db.scalar(select(Product).where(Product.product_id == "B0OPTIN001"))) == []
+    assert c.get("/api/v1/email/verify", params={"token": sent[0].split("token=")[1]}).status_code == 200
+    assert c.get("/api/v1/email/status", params={"email": email}).json()["verified"] is True
+    alerts = []
+    monkeypatch.setattr(m, "send_alert", alerts.append)
+    c.post("/api/v1/observations", json={**obs, "price": 940})
+    assert alerts and alerts[0]["email"] == email
+
+
+def test_telegram_code_is_single_use(c, monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "t")
+    monkeypatch.setenv("TELEGRAM_BOT_USERNAME", "CheaprBot")
+    code = c.post("/api/v1/telegram/link", json={"client_id": str(uuid.uuid4())}).json()["url"].split("start=")[1]
+    replies = []
+    def fake(method, **kw):
+        if method == "getUpdates":
+            return {"result": [{"update_id": 1, "message": {"text": f"/start {code}", "chat": {"id": 1}}},
+                               {"update_id": 2, "message": {"text": f"/start {code}", "chat": {"id": 666}}}]}
+        replies.append((kw["chat_id"], kw["text"]))
+        return {}
+    monkeypatch.setattr(worker, "telegram_api", fake)
+    worker.poll_telegram(0)
+    with Session() as db:
+        assert db.scalar(select(TelegramLink.chat_id).where(TelegramLink.chat_id.in_([1, 666]))) == 1
+    assert "Connected" in replies[0][1] and "Connected" not in replies[1][1]
+
+
+def test_fetch_refuses_offsite_redirect():
+    def handler(req):
+        if req.url.host == "www.amazon.in":
+            return httpx.Response(302, headers={"location": "http://169.254.169.254/latest/meta-data"})
+        raise AssertionError("followed an off-site redirect")
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    assert worker.fetch_store_page(client, "amazon", "https://www.amazon.in/dp/B0FC2YFSN4") is None

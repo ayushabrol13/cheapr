@@ -72,3 +72,17 @@ def test_rate_limit(c, monkeypatch):
     codes = [c.get("/api/v1/coupons", params={"store": "x.in"}).status_code for _ in range(4)]
     assert codes == [200, 200, 200, 429]
     m._hits.clear()
+
+
+def test_admin_endpoints(c):
+    H = {"X-Admin-Token": "secret"}
+    assert c.get("/api/v1/admin/stats").status_code == 403
+    s = c.get("/api/v1/admin/stats", headers=H).json()
+    assert s["products"] >= 1 and "recent_drops" in s
+    rows = c.get("/api/v1/admin/products", params={"q": "test"}, headers=H).json()
+    assert rows and rows[0]["product_id"] == "B0TEST0001" and rows[0]["points"] >= 3
+    coupons = c.get("/api/v1/admin/coupons", params={"store": "shop.in"}, headers=H).json()
+    pending = next(x for x in coupons if x["code"] == "NEW9")
+    assert pending["listed"] is False
+    assert c.delete(f"/api/v1/admin/coupons/{pending['id']}", headers=H).status_code == 200
+    assert c.get("/admin").status_code == 200

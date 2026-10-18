@@ -168,6 +168,13 @@ async function renderTelegram() {
   }
 }
 
+async function renderEmailStatus() {
+  const st = await send({ type: "emailStatus" }).catch(() => null);
+  const f = $("#settings-form");
+  $("#email-status").textContent = !f.email.value ? "" : !st?.available ? "This server can't send email yet."
+    : st.verified ? "✓ Confirmed" : "Not confirmed yet: we email a confirmation link when you set your next alert.";
+}
+
 // ---------- settings ----------
 async function renderSettings() {
   const s = await send({ type: "settings" });
@@ -215,6 +222,7 @@ $("#settings-form").addEventListener("change", async (e) => {
   status("Saved.");
   if (name === "spend") renderSpend();
   if (name === "backend") renderAlerts();
+  if (name === "email" || name === "backend") renderEmailStatus();
 });
 
 // ---------- boot ----------
@@ -222,5 +230,5 @@ if (location.hash === "#settings") { document.body.classList.add("tab"); select(
 renderPage();
 renderAlerts();
 renderSpend();
-renderSettings();
 renderTelegram();
+renderSettings().then(renderEmailStatus);

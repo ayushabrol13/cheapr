@@ -1,96 +1,76 @@
 # Cheapr
 
-A Chrome extension and a self-hosted backend for smarter shopping in India: price history, drop alerts, auto-coupons and a private spending tracker.
+**Is that "70% off" real?** Cheapr is a Chrome extension (with a self-hostable server) that shows real price history right under the price on Amazon.in, Flipkart, Myntra and Ajio. It also flags fake discounts, alerts you when prices drop, and tries coupons at checkout.
 
-| Module | What it does |
+There are no affiliate links, no browsing-history collection and no ads. Price sharing is anonymous and opt-in.
+
+| | What you get |
 |---|---|
-| **Price history** | On Amazon.in, Flipkart, Myntra and Ajio product pages, a card shows the current, lowest, average and highest price, a step chart, and a verdict ("Lowest price", "Good time to buy", "Higher than usual") |
-| **Price-drop alerts** | **Watch** a product with a target price. The backend flags it when any user's visit, or your browser's background re-check every 6 hours, sees it at or below the target. You get a Chrome notification, plus an email if SMTP is configured |
-| **Auto-coupons** | On checkout pages with a coupon box, Cheapr fetches known codes for that store, tries each one, keeps the best, and reports what worked so future rankings improve |
-| **Spend Lens** | On your Amazon, Flipkart, Swiggy and Zomato order pages, it adds up what you've spent by year and by top merchant. It reads those pages with your existing login and **stores the results only in your browser** |
+| **Verdict on every product** | A compact bar under the price: *Lowest price ever · Good deal · Fair price · Usually cheaper*, plus the 3-month low and the usual price. It expands to an interactive chart (1M / 3M / 1Y / All). |
+| **Fake-discount detection** | Warns when a price was raised just before a "sale", or when the MRP is far above any price ever seen. |
+| **Price-drop alerts** | Set a target from the card. Alerts arrive by browser notification, Telegram or email (double opt-in). The server re-checks watched products, so alerts fire even when Chrome is closed. |
+| **Coupons at checkout** | On 20 major Indian stores, one click tries every known code and keeps the best one. Rankings come from what actually worked for other users. Coupons on all sites are an optional grant. |
+| **Spend Tracker** (opt-in) | Adds up your Amazon, Flipkart, Swiggy and Zomato orders by year and by merchant. **Order data never leaves your browser.** |
+| **Admin dashboard** | `/admin` on the server: usage stats, recent price drops, a coupon manager and product search. |
+
+## Install (development)
+
+```bash
+# server: API + worker + Postgres
+cd backend && cp .env.example .env && docker compose up -d --build   # http://localhost:8000
+
+# extension: chrome://extensions → Developer mode → Load unpacked → extension/
+```
+
+On install, a welcome page asks two questions: whether to share prices anonymously, and whether to turn on the Spend Tracker. Then open any Amazon.in product page.
+
+To run the server without Docker: `uv venv && uv pip install -r requirements.txt && .venv/bin/uvicorn app.main:app` (SQLite), plus `python -m app.worker` for re-checks and Telegram.
+
+## Configuration (`backend/.env`)
+
+| Variable | Enables |
+|---|---|
+| `ADMIN_TOKEN` | `/admin` dashboard and the coupon admin API |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM`, `PUBLIC_URL` | email alerts (with confirmation links pointing to `PUBLIC_URL`) |
+| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_BOT_USERNAME` | Telegram alerts (create a bot with @BotFather) |
+| `REFRESH_HOURS` | how stale a watched product can get before the worker re-checks it (default 6) |
+| `TRUST_PROXY`, `RATE_LIMIT_WRITE`, `RATE_LIMIT_READ` | rate limiting behind a reverse proxy |
 
 ## Layout
 
 ```
-cheapr/
-├── extension/          Chrome MV3, plain JS, no build step
-│   ├── manifest.json
-│   ├── background.js   service worker: backend API, alarms, notifications
-│   ├── offscreen.*     DOM parsing for background re-checks
-│   ├── lib/extract.js  product detection (store rules + JSON-LD + meta fallbacks)
-│   ├── content/        product.js · coupons.js · spend.js
-│   ├── popup/          Watchlist · Spend Lens · Settings
-│   └── test/
-├── backend/            FastAPI + SQLAlchemy (Postgres in Docker, SQLite for dev)
-│   ├── app/main.py     observations, history, watches, coupons
-│   ├── docker-compose.yml
-│   └── tests/
-└── docs/                (local research notes, not published)
+extension/            Chrome MV3, plain JS, no build step
+  background.js       service worker: API calls, alerts, badge, migrations, consent
+  lib/extract.js      product detection (store rules → JSON-LD → meta), inline anchor per store
+  lib/format.js       verdict labels, insight sentences, ₹ formatting
+  content/            product.js (verdict card) · coupons.js · spend.js
+  popup/  welcome/    This page · Alerts · Spending · Settings; onboarding + consent
+  test/               unit tests + regression tests on real saved store pages
+  scripts/package.sh  Web Store zip (fails on remote code / eval)
+backend/
+  app/main.py         API: observations, history, watches, coupons, Telegram, email opt-in, admin
+  app/insights.py     verdict + fake-discount detection (time-weighted)
+  app/worker.py       server-side re-checks + Telegram linking
+  app/extract.py      server twin of lib/extract.js, tested on the same pages
+docs/store-listing.md Chrome Web Store kit: listing copy, permission justifications, data disclosure
+PRIVACY.md            privacy policy
 ```
-
-## Run it
-
-**Backend**
-
-```bash
-cd backend
-cp .env.example .env            # optional: ADMIN_TOKEN, SMTP_*
-docker compose up -d --build    # API on http://localhost:8000
-```
-
-To run it without Docker:
-
-```bash
-uv venv && uv pip install -r requirements.txt
-.venv/bin/uvicorn app.main:app --reload    # uses ./cheapr.db
-```
-
-**Extension**
-
-1. Open `chrome://extensions` and turn on **Developer mode**.
-2. Click **Load unpacked** and pick the `extension/` folder.
-3. Open any Amazon.in product page. The Cheapr card appears at the bottom right.
-
-The extension talks to `http://localhost:8000` by default. Change this in **Popup → Settings**; Chrome asks for permission to reach a remote host.
-
-## Adding coupons
-
-```bash
-curl -X POST localhost:8000/api/v1/coupons -H "X-Admin-Token: $ADMIN_TOKEN" \
-  -H 'Content-Type: application/json' -d '{"store":"myntra.com","code":"SAVE200","description":"₹200 off ₹1499"}'
-```
-
-You can also list codes in `backend/seed_coupons.json`, which is loaded at startup. When a code a user tries actually lowers their total, Cheapr adds it automatically as a user-sourced coupon. Rankings use a smoothed success rate.
-
-## API
-
-| Method | Path | Purpose |
-|---|---|---|
-| POST | `/api/v1/observations` | Record a seen price (deduplicated: an unchanged price within 6 hours isn't stored again) |
-| GET | `/api/v1/products/{store}/{id}/history?days=90` | Price points, stats and verdict |
-| POST, GET, DELETE | `/api/v1/watches` | Watchlist, keyed by an anonymous client UUID |
-| GET | `/api/v1/coupons?store=myntra.com` | Ranked coupons |
-| POST | `/api/v1/coupons/report` | Report whether a code worked |
-| POST | `/api/v1/coupons` | Add a coupon (admin token required) |
 
 ## Tests
 
 ```bash
-cd backend && .venv/bin/python -m pytest -q        # API
-node --test extension/test/*.test.mjs              # extractor
+cd backend && .venv/bin/python -m pytest -q     # API, insights, worker, extractor parity (26 tests)
+cd extension && npm test                         # extractor incl. real Amazon/Flipkart/Myntra/Ajio pages
 ```
+
+CI runs both suites and builds the extension zip on every push.
 
 ## Known limits
 
-- **History starts empty.** The backend only knows prices that Cheapr users have seen. To backfill, import your own data into `prices`.
-- **Selectors drift.** Store page markup changes. Fix product detection in `lib/extract.js` (JSON-LD is the most stable source) and the Spend Lens parsers in `content/spend.js`.
-- **Coupon heuristics are generic.** They cover Shopify and WooCommerce plus keyword matching. Stores with custom coupon popups may need a site rule.
-- **Spend Lens is best-effort.** It reads each site's own order pages and endpoints, which can change without notice. Use it on your own account only.
-- **Not ready for public hosting yet.** Built-in protections:
-  - strict store-URL checks
-  - observations far outside 20–500% of the last price are rejected
-  - each client gets one vote per coupon
-  - user-submitted codes stay hidden until two different clients confirm them
-  - no email is sent when a watch is saved
+- **History starts empty.** It builds from opt-in sharing, alerts and worker re-checks. There is no paid data feed.
+- **Store markup changes.** When a selector breaks, refresh the saved fixture with `test/save-fixture.py` and fix `lib/extract.js` together with `app/extract.py`. JSON-LD is the most stable source.
+- **Server re-checks may hit captchas.** The worker paces itself and skips any page that doesn't return a price. Crowd observations keep history going regardless.
+- **Spend Tracker and coupons are best-effort.** They read pages and endpoints that stores can change without notice.
+- **Rate limits are per process.** Move them to Redis before running several API workers.
 
-  Before exposing the API, add per-client rate limits and email double opt-in, since alert addresses are currently unverified.
+License: MIT

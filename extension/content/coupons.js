@@ -96,9 +96,16 @@
       button{background:#6941c6;color:#fff;border:0;border-radius:8px;padding:5px 10px;cursor:pointer;font:inherit}
       button:focus-visible{outline:2px solid #6941c6;outline-offset:2px}
       button:disabled{opacity:.5;cursor:default}
-    </style><div role="status"><span></span><button>Try all</button></div>`;
-    const msg = root.querySelector("span"), btn = root.querySelector("button");
-    msg.textContent = `Cheapr found ${coupons.length} coupon${coupons.length > 1 ? "s" : ""}`;
+      .x{background:none;color:#667085;padding:2px 6px;font-size:16px}
+    </style><div role="status"><span></span><button class="try">Try all</button><button class="x" aria-label="Dismiss for 7 days">×</button></div>`;
+    const msg = root.querySelector("span"), btn = root.querySelector(".try");
+    root.querySelector(".x").onclick = async () => {
+      const { couponDismissed = {} } = await chrome.storage.local.get("couponDismissed");
+      await chrome.storage.local.set({ couponDismissed: { ...couponDismissed, [store]: Date.now() } });
+      host.remove();
+    };
+    msg.textContent = `Cheapr has ${coupons.length} coupon${coupons.length > 1 ? "s" : ""} for this store`;
+    btn.textContent = `Try ${coupons.length} code${coupons.length > 1 ? "s" : ""}`;
     btn.onclick = async () => {
       btn.disabled = true;
       await tryAll(coupons, (t) => (msg.textContent = t));
@@ -108,8 +115,9 @@
   }
 
   (async () => {
-    const { coupons: enabled } = await chrome.storage.sync.get({ coupons: true });
-    if (!enabled) return;
+    const [{ coupons: enabled, quiet }, { couponDismissed = {} }] = await Promise.all([
+      chrome.storage.sync.get({ coupons: true, quiet: false }), chrome.storage.local.get("couponDismissed")]);
+    if (!enabled || quiet || Date.now() - (couponDismissed[store] || 0) < 7 * 864e5) return; // dismissed: quiet for a week
     for (let i = 0; i < 15 && !findInput(); i++) await sleep(2000); // coupon boxes often render late
     if (!findInput()) return;
     const list = await send({ type: "coupons", store }).catch(() => []);

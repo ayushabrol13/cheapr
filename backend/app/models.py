@@ -1,7 +1,7 @@
 import os
 from datetime import datetime, timezone
 
-from sqlalchemy import (BigInteger, Boolean, DateTime, Float, ForeignKey, String, UniqueConstraint,
+from sqlalchemy import (BigInteger, Boolean, DateTime, Float, ForeignKey, Integer, String, UniqueConstraint,
                         create_engine)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
@@ -84,3 +84,15 @@ class TelegramLink(Base):
     code: Mapped[str] = mapped_column(String(32), unique=True)
     chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+
+class EmailAddress(Base):
+    """Alert recipients. Alerts go only to verified addresses (double opt-in), capped per day."""
+    __tablename__ = "email_addresses"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    email: Mapped[str] = mapped_column(String(320), unique=True)
+    token: Mapped[str] = mapped_column(String(64), unique=True)
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    verify_sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    sent_day: Mapped[str] = mapped_column(String(10), default="")
+    sent_count: Mapped[int] = mapped_column(Integer, default=0)

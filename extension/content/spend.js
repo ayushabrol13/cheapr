@@ -110,8 +110,10 @@
     div{background:#fff;border:1px solid #e4e7ec;border-radius:12px;box-shadow:0 8px 24px rgba(16,24,40,.15);padding:10px 14px;display:flex;gap:10px;align-items:center;color:#101828;max-width:320px}
     button{background:#6941c6;color:#fff;border:0;border-radius:8px;padding:5px 10px;cursor:pointer;font:inherit;white-space:nowrap}
     button:focus-visible{outline:2px solid #6941c6;outline-offset:2px}
-  </style><div role="status"><span>Cheapr Spend Tracker: add up what you've spent here (stays on this device).</span><button>Scan orders</button></div>`;
-  const msg = root.querySelector("span"), btn = root.querySelector("button");
+    .x{background:none;color:#667085;padding:2px 6px;font-size:16px}
+  </style><div role="status"><span>Cheapr Spend Tracker: add up what you've spent here (stays on this device).</span><button class="scan">Scan orders</button><button class="x" aria-label="Hide">×</button></div>`;
+  const msg = root.querySelector("span"), btn = root.querySelector(".scan");
+  root.querySelector(".x").onclick = () => host.remove();
   btn.onclick = async () => {
     btn.disabled = true;
     try {

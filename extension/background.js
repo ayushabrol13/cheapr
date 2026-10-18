@@ -82,6 +82,10 @@ const handlers = {
     });
   },
   settings,
+  async emailStatus() {
+    const { email } = await settings();
+    return email ? api("/api/v1/email/status", { query: { email } }) : { verified: false, available: false };
+  },
   async telegram({ action }) {
     const client_id = await clientId();
     if (action === "link") return api("/api/v1/telegram/link", { method: "POST", body: { client_id } });

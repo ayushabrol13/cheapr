@@ -10,13 +10,13 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import case, func, select
 
 from .insights import Point, analyze
-from .alerts import send_alert
-from .models import Base, Coupon, CouponReport, Price, Product, Session, TelegramLink, Watch, engine, now
+from .alerts import send_alert, send_verification
+from .models import Base, Coupon, CouponReport, Price, Product, Session, TelegramLink, Watch, EmailAddress, engine, now
 
 log = logging.getLogger("cheapr")
 
@@ -24,7 +24,9 @@ log = logging.getLogger("cheapr")
 STORES = {"amazon": ("amazon.in",), "flipkart": ("flipkart.com",), "myntra": ("myntra.com",), "ajio": ("ajio.com",)}
 DEDUPE_WINDOW = timedelta(hours=6)
 MAX_SWING = (0.2, 5.0)  # an observation outside 20%..500% of the last price is treated as bogus
-MIN_CONFIRMATIONS = 2  # distinct clients before a user-submitted coupon is listed
+MIN_CONFIRMATIONS = 2
+EMAILS_PER_DAY = 20  # per verified address: a runaway price feed can't spam anyone
+TG_CODE_TTL = timedelta(minutes=30)  # distinct clients before a user-submitted coupon is listed
 UUID = r"^[0-9a-fA-F-]{36}$"
 CODE = r"^[A-Za-z0-9_-]{2,40}$"
 EMAIL = r"^[^@\s]{1,64}@[^@\s]{1,255}\.[^@\s]+$"
@@ -131,6 +133,32 @@ def record_price(db, p: Product, price: float, mrp: float | None, in_stock: bool
     return trigger_watches(db, p) if in_stock else []
 
 
+def email_allowed(db, email: str) -> bool:
+    """Verified (double opt-in) and under today's cap; counts this send."""
+    e = db.scalar(select(EmailAddress).where(EmailAddress.email == email.lower()))
+    if not e or not e.verified_at:
+        return False
+    today = now().date().isoformat()
+    if e.sent_day != today:
+        e.sent_day, e.sent_count = today, 0
+    if e.sent_count >= EMAILS_PER_DAY:
+        return False
+    e.sent_count += 1
+    return True
+
+
+def request_verification(db, email: str, bg: BackgroundTasks) -> None:
+    email = email.lower()
+    e = db.scalar(select(EmailAddress).where(EmailAddress.email == email))
+    if e is None:
+        e = EmailAddress(email=email, token=secrets.token_urlsafe(32))
+        db.add(e)
+    base = os.environ.get("PUBLIC_URL", "http://localhost:8000").rstrip("/")
+    if not e.verified_at and os.environ.get("SMTP_HOST") and (not e.verify_sent_at or now() - e.verify_sent_at > timedelta(hours=1)):
+        e.verify_sent_at = now()  # at most one confirmation mail per address per hour
+        bg.add_task(send_verification, email, f"{base}/api/v1/email/verify?token={e.token}")
+
+
 def trigger_watches(db, p: Product) -> list[dict]:
     alerts = []
     hits = db.scalars(select(Watch).where(Watch.product_fk == p.id, Watch.triggered_at.is_(None),
@@ -138,9 +166,9 @@ def trigger_watches(db, p: Product) -> list[dict]:
     for w in hits:
         w.triggered_at, w.triggered_price = now(), p.last_price
         link = db.scalar(select(TelegramLink).where(TelegramLink.client_id == w.client_id, TelegramLink.chat_id.is_not(None)))
-        # shortcut: emails go to unverified addresses; add double opt-in before opening the server to the public
         alerts.append({"title": p.title, "url": p.url, "price": p.last_price, "target": w.target_price,
-                       "email": w.email, "chat_id": link.chat_id if link else None})
+                       "email": w.email if w.email and email_allowed(db, w.email) else None,
+                       "chat_id": link.chat_id if link else None})
     return alerts
 
 
@@ -180,7 +208,7 @@ def watch_out(w: Watch, p: Product) -> dict:
 
 
 @app.post("/api/v1/watches")
-def add_watch(body: WatchIn, db=Depends(get_db)):
+def add_watch(body: WatchIn, bg: BackgroundTasks, db=Depends(get_db)):
     p = find_product(db, body.store, body.product_id)
     if p is None:
         raise HTTPException(404, "product not seen yet; open its page first")
@@ -191,6 +219,8 @@ def add_watch(body: WatchIn, db=Depends(get_db)):
     w.target_price, w.email, w.triggered_at, w.triggered_price = body.target_price, body.email, None, None
     db.flush()
     trigger_watches(db, p)  # already below target: flag it, but never send alerts on save (spam relay)
+    if body.email:
+        request_verification(db, body.email, bg)
     return watch_out(w, p)
 
 
@@ -210,6 +240,22 @@ def delete_watch(watch_id: int, client_id: str, db=Depends(get_db)):
     return {"ok": True}
 
 
+@app.get("/api/v1/email/verify", response_class=HTMLResponse)
+def verify_email(token: str = Query(max_length=64), db=Depends(get_db)):
+    e = db.scalar(select(EmailAddress).where(EmailAddress.token == token))
+    if e is None:
+        return HTMLResponse("<h1>Link expired or invalid</h1>", status_code=404)
+    e.verified_at = e.verified_at or now()
+    return "<!doctype html><meta charset=utf-8><title>Cheapr</title><body style='font:16px system-ui;text-align:center;margin-top:20vh'>" \
+           "<h1>Email confirmed ✓</h1><p>Cheapr will email you when a watched price drops.</p>"
+
+
+@app.get("/api/v1/email/status")
+def email_status(email: str = Query(pattern=EMAIL, max_length=320), db=Depends(get_db)):
+    e = db.scalar(select(EmailAddress).where(EmailAddress.email == email.lower()))
+    return {"verified": bool(e and e.verified_at), "available": bool(os.environ.get("SMTP_HOST"))}
+
+
 # ---------- telegram ----------
 
 class ClientIn(BaseModel):
@@ -223,8 +269,10 @@ def telegram_link(body: ClientIn, db=Depends(get_db)):
         raise HTTPException(503, "Telegram alerts are not configured on this server")
     link = db.scalar(select(TelegramLink).where(TelegramLink.client_id == body.client_id))
     if link is None:
-        link = TelegramLink(client_id=body.client_id, code=secrets.token_urlsafe(16)[:24])
+        link = TelegramLink(client_id=body.client_id, code=secrets.token_urlsafe(18))
         db.add(link)
+    elif link.chat_id is None and now() - link.created_at > TG_CODE_TTL:
+        link.code, link.created_at = secrets.token_urlsafe(18), now()  # expired codes are rotated
     return {"url": f"https://t.me/{bot}?start={link.code}", "connected": link.chat_id is not None}
 
 
@@ -297,7 +345,7 @@ class CouponIn(BaseModel):
 
 def admin(x_admin_token: str = Header("")) -> None:
     token = os.environ.get("ADMIN_TOKEN")
-    if not token or x_admin_token != token:
+    if not token or not secrets.compare_digest(x_admin_token.encode(), token.encode()):
         raise HTTPException(403, "admin token required")
 
 
@@ -307,6 +355,86 @@ def add_coupon(c: CouponIn, db=Depends(get_db)):
     row = db.scalar(select(Coupon).where(Coupon.store == store, Coupon.code == code)) or Coupon(store=store, code=code)
     row.description, row.expires_at, row.source = c.description, c.expires_at, "admin"
     db.add(row)
+    return {"ok": True}
+
+
+# ---------- admin ----------
+
+@app.get("/admin", include_in_schema=False)
+def admin_page():
+    return FileResponse(Path(__file__).parent / "static" / "admin.html", headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/v1/admin/stats", dependencies=[Depends(admin)])
+def admin_stats(db=Depends(get_db)):
+    n = lambda q: db.scalar(q) or 0  # noqa: E731
+    week, day = now() - timedelta(days=7), now() - timedelta(days=1)
+    reports = n(select(func.count(CouponReport.id)))
+    worked = n(select(func.count(CouponReport.id)).where(CouponReport.worked.is_(True)))
+    return {
+        "products": n(select(func.count(Product.id))),
+        "products_7d": n(select(func.count(Product.id)).where(Product.id.in_(
+            select(Price.product_fk).group_by(Price.product_fk).having(func.min(Price.observed_at) >= week)))),
+        "prices": n(select(func.count(Price.id))),
+        "prices_24h": n(select(func.count(Price.id)).where(Price.observed_at >= day)),
+        "watches": n(select(func.count(Watch.id)).where(Watch.triggered_at.is_(None))),
+        "clients": n(select(func.count(func.distinct(Watch.client_id)))),
+        "alerts_7d": n(select(func.count(Watch.id)).where(Watch.triggered_at >= week)),
+        "coupons": n(select(func.count(Coupon.id))),
+        "coupons_user": n(select(func.count(Coupon.id)).where(Coupon.source == "user")),
+        "reports": reports, "report_success": worked / reports if reports else 0,
+        "recent_drops": [r for r in admin_product_rows(db, limit=200) if r["change"] < 0][:10],
+    }
+
+
+def admin_product_rows(db, q: str = "", limit: int = 100) -> list[dict]:
+    stmt = select(Product).order_by(Product.updated_at.desc()).limit(limit)
+    if q:
+        like = f"%{q.lower()}%"
+        stmt = stmt.where(func.lower(Product.title).like(like) | func.lower(Product.product_id).like(like))
+    products = db.scalars(stmt).all()
+    ids = [p.id for p in products]
+    agg = {pid: (lo, hi, cnt) for pid, lo, hi, cnt in db.execute(
+        select(Price.product_fk, func.min(Price.price), func.max(Price.price), func.count(Price.id))
+        .where(Price.product_fk.in_(ids)).group_by(Price.product_fk))} if ids else {}
+    watchers = dict(db.execute(select(Watch.product_fk, func.count(Watch.id)).where(Watch.product_fk.in_(ids))
+                               .group_by(Watch.product_fk)).all()) if ids else {}
+    rows = []
+    for p in products:
+        lo, hi, cnt = agg.get(p.id, (p.last_price, p.last_price, 0))
+        prev = db.scalar(select(Price.price).where(Price.product_fk == p.id, Price.price != p.last_price)
+                         .order_by(Price.observed_at.desc()).limit(1))
+        rows.append({"store": p.store, "product_id": p.product_id, "title": p.title, "url": p.url, "price": p.last_price,
+                     "change": round((p.last_price / prev - 1) * 100) if prev else 0, "min": lo, "max": hi,
+                     "points": cnt, "watchers": watchers.get(p.id, 0), "updated_at": p.updated_at.isoformat() + "Z"})
+    return rows
+
+
+@app.get("/api/v1/admin/products", dependencies=[Depends(admin)])
+def admin_products(q: str = Query("", max_length=100), db=Depends(get_db)):
+    return admin_product_rows(db, q.strip())
+
+
+@app.get("/api/v1/admin/coupons", dependencies=[Depends(admin)])
+def admin_coupons(store: str = Query("", max_length=253), db=Depends(get_db)):
+    stmt = (select(Coupon, func.count(CouponReport.id), func.coalesce(func.sum(case((CouponReport.worked, 1), else_=0)), 0))
+            .outerjoin(CouponReport, CouponReport.coupon_fk == Coupon.id).group_by(Coupon.id))
+    if store:
+        stmt = stmt.where(Coupon.store == store.lower().removeprefix("www."))
+    out = [{"id": c.id, "store": c.store, "code": c.code, "description": c.description, "source": c.source,
+            "tries": n, "worked": int(ok), "score": round((ok + 1) / (n + 2), 3),
+            "expires_at": c.expires_at.isoformat() if c.expires_at else None,
+            "listed": c.source != "user" or ok >= MIN_CONFIRMATIONS} for c, n, ok in db.execute(stmt).all()]
+    return sorted(out, key=lambda c: -c["score"])
+
+
+@app.delete("/api/v1/admin/coupons/{coupon_id}", dependencies=[Depends(admin)])
+def admin_delete_coupon(coupon_id: int, db=Depends(get_db)):
+    c = db.get(Coupon, coupon_id)
+    if c is None:
+        raise HTTPException(404, "not found")
+    db.execute(CouponReport.__table__.delete().where(CouponReport.coupon_fk == coupon_id))
+    db.delete(c)
     return {"ok": True}
 
 

@@ -4,6 +4,7 @@ and links Telegram chats. Run with `python -m app.worker`.
 import logging
 import os
 import random
+import secrets
 import time
 from datetime import timedelta
 
@@ -12,7 +13,7 @@ from sqlalchemy import select
 
 from .alerts import send_alert, telegram_api
 from .extract import extract_price
-from .main import record_price, startup
+from .main import TG_CODE_TTL, host_ok, record_price, startup
 from .models import Product, Session, TelegramLink, Watch, now
 
 log = logging.getLogger("cheapr.worker")
@@ -25,6 +26,29 @@ HEADERS = {  # a normal desktop browser; stores serve bot-looking clients a capt
 }
 
 
+MAX_BYTES = 6 * 1024 * 1024
+
+
+def fetch_store_page(client: httpx.Client, store: str, url: str) -> str | None:
+    """GET a product page, following at most 3 redirects and only to the same store's hosts (no SSRF via redirects)."""
+    for _ in range(4):
+        if not host_ok(store, url):
+            return None
+        with client.stream("GET", url, headers=HEADERS, timeout=20, follow_redirects=False) as r:
+            if r.is_redirect:
+                url = str(r.url.join(r.headers.get("location", "")))
+                continue
+            if r.status_code != 200:
+                return None
+            body = bytearray()
+            for chunk in r.iter_bytes():
+                body += chunk
+                if len(body) > MAX_BYTES:
+                    return None
+            return body.decode(r.encoding or "utf-8", errors="replace")
+    return None
+
+
 def refresh_due(client: httpx.Client) -> int:
     """Re-check products that someone is watching and nobody has seen recently. Returns products refreshed."""
     with Session.begin() as db:
@@ -35,10 +59,10 @@ def refresh_due(client: httpx.Client) -> int:
     done = 0
     for pid, store, url in targets:
         try:
-            r = client.get(url, headers=HEADERS, timeout=20, follow_redirects=True)
-            got = extract_price(store, r.text) if r.status_code == 200 else None
+            html = fetch_store_page(client, store, url)
+            got = extract_price(store, html) if html else None
         except httpx.HTTPError as e:
-            log.warning("fetch failed %s: %s", url, e)
+            log.warning("fetch failed %s: %s", url, type(e).__name__)
             got = None
         if got:
             with Session.begin() as db:
@@ -49,7 +73,7 @@ def refresh_due(client: httpx.Client) -> int:
                 else:
                     alerts = []
             for a in alerts:
-                send_alert(a)
+                send_alert(a)  # never raises
         else:
             log.info("no price for %s (status/captcha?)", url)
         time.sleep(random.uniform(4, 9))  # polite pacing per store page
@@ -68,8 +92,11 @@ def poll_telegram(offset: int) -> int:
         code = text.partition(" ")[2].strip()
         with Session.begin() as db:
             link = db.scalar(select(TelegramLink).where(TelegramLink.code == code)) if code else None
+            # single use and short-lived: a leaked or old link can't attach someone else's chat
+            if link and (link.chat_id is not None or now() - link.created_at > TG_CODE_TTL):
+                link = None
             if link:
-                link.chat_id = chat
+                link.chat_id, link.code = chat, secrets.token_urlsafe(18)
         telegram_api("sendMessage", chat_id=chat, text=(
             "✅ Connected. Cheapr will message you here when a watched price drops." if link
             else "Open Cheapr → Settings → “Get alerts on Telegram” to connect this chat."))
@@ -83,7 +110,10 @@ def main() -> None:
     with httpx.Client(http2=False) as client:
         while True:
             if time.monotonic() >= next_refresh:
-                log.info("refreshed %d products", refresh_due(client))
+                try:
+                    log.info("refreshed %d products", refresh_due(client))
+                except Exception:
+                    log.exception("refresh cycle failed")
                 next_refresh = time.monotonic() + 15 * 60
             if os.environ.get("TELEGRAM_BOT_TOKEN"):
                 try:
