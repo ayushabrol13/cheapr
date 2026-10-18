@@ -47,12 +47,13 @@ def test_watch_triggers_on_drop(c):
     w = c.post("/api/v1/watches", json={"client_id": CID, "store": "amazon", "product_id": "B0TEST0001",
                                         "target_price": 800}).json()
     assert w["triggered_at"] is None
+    for _ in range(2):
+        c.post("/api/v1/observations", json=obs(799))
+    [w] = c.get("/api/v1/watches", params={"client_id": CID}).json()
+    assert w["triggered_at"] is None  # two networks aren't enough (a dual-stack host spans two)
     c.post("/api/v1/observations", json=obs(799))
     [w] = c.get("/api/v1/watches", params={"client_id": CID}).json()
-    assert w["triggered_at"] is None  # one unconfirmed crowd report never alerts
-    c.post("/api/v1/observations", json=obs(799))
-    [w] = c.get("/api/v1/watches", params={"client_id": CID}).json()
-    assert w["triggered_price"] == 799  # a second, different source confirms it
+    assert w["triggered_price"] == 799  # a third independent network confirms it
     assert c.delete(f"/api/v1/watches/{w['id']}", params={"client_id": "someone-else"}).status_code == 404
     assert c.delete(f"/api/v1/watches/{w['id']}", params={"client_id": CID}).status_code == 200
 
@@ -104,7 +105,8 @@ def test_out_of_band_price_needs_two_sources_then_unfreezes(c):
                    "client_id": str(uuid.uuid4())}
     c.post("/api/v1/observations", json=o(100))  # wrong first price (say, an EMI amount)
     assert c.post("/api/v1/observations", json=o(9000)).json()["accepted"] is False
-    assert c.post("/api/v1/observations", json=o(9100)).json()["accepted"] is True  # second source agrees: accepted
+    assert c.post("/api/v1/observations", json=o(9050)).json()["accepted"] is False
+    assert c.post("/api/v1/observations", json=o(9100)).json()["accepted"] is True  # third network agrees: accepted
     assert c.get("/api/v1/products/amazon/B0BAND0001/history").json()["product"]["price"] == 9100
 
 
@@ -127,7 +129,7 @@ def test_any_drop_alerts_rearm_on_each_new_low(c):
     w = c.post("/api/v1/watches", json={"client_id": cid, "store": "amazon", "product_id": "B0ANY00001",
                                         "target_price": 1000, "mode": "any"}).json()
     assert w["target_price"] == 999 and w["triggered_at"] is None
-    for _ in range(2):
+    for _ in range(3):
         c.post("/api/v1/observations", json=o(950))
     [w] = c.get("/api/v1/watches", params={"client_id": cid}).json()
     assert w["triggered_price"] == 950 and w["target_price"] == 949  # re-armed below the new low
@@ -176,3 +178,14 @@ def test_image_urls_are_strictly_validated():
                 "http://m.media-amazon.com/x.jpg", "https://m.media-amazon.com.evil.example/x.jpg",
                 "https://m.media-amazon.com:8443/x.jpg", "https://rukmini1.flixcart.com/x.jpg"]:
         assert safe_image("amazon", bad) == "", bad
+
+
+def test_bulk_import_creates_watches_in_one_request(c):
+    cid = str(uuid.uuid4())
+    items = [{"store": "amazon", "product_id": f"B0BULK{i:04d}", "url": f"https://www.amazon.in/dp/B0BULK{i:04d}",
+              "title": f"Item {i}", "price": 100 + i} for i in range(30)]
+    items.append({"store": "amazon", "product_id": "B0EVIL0001", "url": "https://evil.example/dp/B0EVIL0001", "title": "x", "price": 5})
+    r = c.post("/api/v1/watches/bulk", json={"client_id": cid, "items": items})
+    assert r.status_code == 200 and r.json()["added"] == 30  # off-store URL skipped
+    watches = c.get("/api/v1/watches", params={"client_id": cid}).json()
+    assert len(watches) == 30 and all(w["mode"] == "any" and w["target_price"] == w["price"] - 1 for w in watches)

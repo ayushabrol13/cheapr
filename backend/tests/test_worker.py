@@ -80,7 +80,7 @@ def test_email_alerts_need_double_opt_in(c, monkeypatch):
     assert c.get("/api/v1/email/status", params={"client_id": other, "email": email}).json()["verified"] is False
     alerts = []
     monkeypatch.setattr(m, "send_alert", alerts.append)
-    for _ in range(2):  # two independent reports confirm the drop
+    for _ in range(3):  # three independent networks confirm the drop
         c.post("/api/v1/observations", json={**obs, "price": 940, "client_id": str(uuid.uuid4())})
     assert alerts and alerts[0]["email"] == email
 

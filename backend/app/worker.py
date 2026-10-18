@@ -9,12 +9,12 @@ import time
 from datetime import timedelta
 
 import httpx
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 
 from .alerts import send_alert, telegram_api
 from .extract import extract_price
 from .main import TG_CODE_TTL, host_ok, record_price
-from .models import Product, Session, TelegramLink, Watch, now
+from .models import Product, Session, Sighting, TelegramLink, Watch, now
 
 log = logging.getLogger("cheapr.worker")
 REFRESH_EVERY = timedelta(hours=float(os.environ.get("REFRESH_HOURS", "6")))
@@ -56,6 +56,7 @@ def refresh_due(client: httpx.Client) -> int:
         # Unconfirmed crowd prices expire after a day; until then they are re-checked first, at most every 30 min
         # and at most 50 per cycle, so a flood of fake low prices can't starve the regular refresh queue.
         db.execute(update(Product).where(Product.needs_check, Product.updated_at < t - timedelta(hours=24)).values(needs_check=False))
+        db.execute(delete(Sighting).where(Sighting.seen_at < t - timedelta(hours=25)))  # only the confirm window matters
         urgent = db.scalars(select(Product).where(Product.needs_check, Product.checked_at.is_(None) | (Product.checked_at < t - timedelta(minutes=30)))
                             .order_by(Product.checked_at.asc().nulls_first()).limit(min(50, MAX_PER_CYCLE))).all()
         # Then watched products not attempted recently. checked_at moves on every attempt, so captcha'd pages don't

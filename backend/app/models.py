@@ -120,3 +120,15 @@ class EmailSend(Base):
     client_id: Mapped[str] = mapped_column(String(64))
     kind: Mapped[str] = mapped_column(String(8))  # verify | alert
     sent_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+
+class Sighting(Base):
+    """Who (hashed network) saw which price, kept 24h for confirmation counting. History rows are deduped, so
+    they can't tell us how many independent networks reported a price."""
+    __tablename__ = "sightings"
+    __table_args__ = (Index("ix_sightings_product_at", "product_fk", "seen_at"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    product_fk: Mapped[int] = mapped_column(ForeignKey("products.id"))
+    net: Mapped[str] = mapped_column(String(16))
+    price: Mapped[float] = mapped_column(Float)
+    seen_at: Mapped[datetime] = mapped_column(DateTime, default=now)

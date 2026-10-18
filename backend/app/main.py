@@ -23,7 +23,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from .insights import Point, analyze
 from .migrate import upgrade
 from .alerts import clean, send_alert, send_verification
-from .models import Coupon, CouponReport, Price, Product, Session, TelegramLink, Watch, EmailAddress, EmailSend, EmailThrottle, engine, now
+from .models import Coupon, CouponReport, Price, Product, Session, Sighting, TelegramLink, Watch, EmailAddress, EmailSend, EmailThrottle, engine, now
 
 log = logging.getLogger("cheapr")
 
@@ -192,6 +192,7 @@ def observe(o: Observation, request: Request, bg: BackgroundTasks, db=Depends(ge
 
 SOURCE_GAP = timedelta(hours=1)  # one counted observation per source per product per hour
 CONFIRM_WINDOW = timedelta(hours=24)
+CONFIRM_NETS = 3  # distinct client networks (incl. this one) that must agree; a dual-stack host spans only two
 
 
 def record_price(db, p: Product, price: float, mrp: float | None, in_stock: bool, source: str, net: str = "") -> dict:
@@ -212,7 +213,7 @@ def record_price(db, p: Product, price: float, mrp: float | None, in_stock: bool
                                                Price.net != net,
                                                Price.observed_at >= t - CONFIRM_WINDOW,
                                                Price.price.between(price * 0.95, price * 1.05))).all()
-        if not (trusted or agree):
+        if not (trusted or len({r.net for r in agree}) + 1 >= CONFIRM_NETS):
             db.add(Price(product_fk=p.id, price=price, mrp=mrp, in_stock=in_stock, source=source, net=net, suspect=True, observed_at=t))
             return {"accepted": False, "alerts": []}
         for row in agree:
@@ -222,6 +223,9 @@ def record_price(db, p: Product, price: float, mrp: float | None, in_stock: bool
     if not (last and last.price == price and last.in_stock == in_stock and t - last.observed_at < DEDUPE_WINDOW):
         db.add(Price(product_fk=p.id, price=price, mrp=mrp, in_stock=in_stock, source=source, net=net, observed_at=t))
     p.last_price, p.updated_at = price, t
+    if not trusted and net:
+        db.add(Sighting(product_fk=p.id, net=net, price=price, seen_at=t))
+        db.flush()
     if not in_stock:
         return {"accepted": True, "alerts": []}
     if trusted:
@@ -231,11 +235,11 @@ def record_price(db, p: Product, price: float, mrp: float | None, in_stock: bool
                                                 Watch.triggered_at.is_(None) | (Watch.mode == "any")).limit(1))
     if not crossing:
         return {"accepted": True, "alerts": []}
-    confirmed = db.scalar(select(Price.id).where(Price.product_fk == p.id, Price.suspect.is_(False), Price.source != source,
-                                                 Price.source != "", (Price.net != net) | (Price.source == "worker"),
-                                                 Price.observed_at >= t - CONFIRM_WINDOW,
-                                                 Price.price <= price * 1.02).limit(1))
-    if confirmed:
+    worker_saw = db.scalar(select(Price.id).where(Price.product_fk == p.id, Price.source == "worker", Price.suspect.is_(False),
+                                                  Price.observed_at >= t - CONFIRM_WINDOW, Price.price <= price * 1.02).limit(1))
+    nets = set(db.scalars(select(Sighting.net).where(Sighting.product_fk == p.id, Sighting.seen_at >= t - CONFIRM_WINDOW,
+                                                     Sighting.price <= price * 1.02)))
+    if worker_saw or len(nets) >= CONFIRM_NETS:
         return {"accepted": True, "alerts": trigger_watches(db, p)}
     p.needs_check = True  # one unconfirmed report: the worker re-checks it before anyone is alerted
     return {"accepted": True, "alerts": []}
@@ -391,6 +395,49 @@ def add_watch(body: WatchIn, bg: BackgroundTasks, db=Depends(get_db)):
     if body.email:
         request_verification(db, body.client_id, body.email, bg)
     return watch_out(w, p)
+
+
+class BulkItem(BaseModel):
+    store: str = Field(max_length=32)
+    product_id: str = Field(min_length=1, max_length=64)
+    url: str = Field(max_length=2048)
+    title: str = Field("", max_length=512)
+    image: str = Field("", max_length=2048)
+    price: float = Field(gt=0, lt=1e8)
+
+
+class BulkWatchIn(BaseModel):
+    client_id: str = Field(pattern=UUID)
+    mode: str = Field("any", pattern="^(target|any)$")
+    email: str | None = Field(None, pattern=EMAIL, max_length=320)
+    items: list[BulkItem] = Field(min_length=1, max_length=50)
+
+
+@app.post("/api/v1/watches/bulk")
+def bulk_watches(body: BulkWatchIn, request: Request, bg: BackgroundTasks, db=Depends(get_db)):
+    """Wishlist import: record each item's price and watch it, in one request (stays inside per-IP rate limits)."""
+    source, net = source_of(body.client_id, request)
+    added = 0
+    for it in body.items:
+        if not host_ok(it.store, it.url):
+            continue
+        p = find_product(db, it.store, it.product_id)
+        if p is None:
+            p = Product(store=it.store, product_id=it.product_id, url=it.url, last_price=it.price,
+                        title=clean(it.title, 512), image=safe_image(it.store, it.image))
+            db.add(p)
+            db.flush()
+            record_price(db, p, it.price, None, True, source, net)
+        w = db.scalar(select(Watch).where(Watch.client_id == body.client_id, Watch.product_fk == p.id))
+        if w is None:
+            w = Watch(client_id=body.client_id, product_fk=p.id, target_price=it.price)
+            db.add(w)
+        target = round(p.last_price - 1, 2) if body.mode == "any" else it.price
+        w.target_price, w.mode, w.email, w.triggered_at, w.triggered_price = max(target, 0.01), body.mode, body.email, None, None
+        added += 1
+    if body.email and added:
+        request_verification(db, body.client_id, body.email, bg)
+    return {"added": added}
 
 
 @app.get("/api/v1/watches")
