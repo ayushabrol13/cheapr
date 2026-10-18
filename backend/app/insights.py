@@ -52,6 +52,10 @@ def analyze(points: list[Point], mrp: float | None, now: datetime, window_days: 
         return {"verdict": "new", "stats": stats, "insights": insights}
 
     avg = stats["avg"] or cur
+    if stats["all_time_low"] == stats["all_time_high"]:
+        # A price that has never moved is neither a deal nor a rip-off: say so instead of "lowest ever".
+        insights.append({"kind": "stable", "since": ps[0].t.isoformat() + "Z"})
+        return {"verdict": "fair", "stats": stats, "insights": insights}
     if cur <= stats["all_time_low"] * 1.01:
         verdict = "buy"
         insights.append({"kind": "all_time_low"})

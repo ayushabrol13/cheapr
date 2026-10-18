@@ -29,7 +29,9 @@ class Product(Base):
     image: Mapped[str] = mapped_column(String(2048), default="")
     currency: Mapped[str] = mapped_column(String(8), default="INR")
     last_price: Mapped[float] = mapped_column(Float)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now)  # last accepted price
+    checked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)  # last worker attempt (success or not)
+    needs_check: Mapped[bool] = mapped_column(Boolean, default=False)  # unconfirmed crowd price crossed a target
 
 
 class Price(Base):
@@ -40,6 +42,8 @@ class Price(Base):
     mrp: Mapped[float | None] = mapped_column(Float, nullable=True)
     in_stock: Mapped[bool] = mapped_column(Boolean, default=True)
     observed_at: Mapped[datetime] = mapped_column(DateTime, default=now, index=True)
+    source: Mapped[str] = mapped_column(String(16), default="")  # hashed install id, "worker", or ""
+    suspect: Mapped[bool] = mapped_column(Boolean, default=False)  # outside the sanity band, awaiting a 2nd source
 
 
 class Watch(Base):
@@ -49,6 +53,7 @@ class Watch(Base):
     client_id: Mapped[str] = mapped_column(String(64), index=True)
     product_fk: Mapped[int] = mapped_column(ForeignKey("products.id"), index=True)
     target_price: Mapped[float] = mapped_column(Float)
+    mode: Mapped[str] = mapped_column(String(8), default="target")  # target | any (re-arms on every new low)
     email: Mapped[str | None] = mapped_column(String(320), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     triggered_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

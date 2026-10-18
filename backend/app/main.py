@@ -1,8 +1,10 @@
+import hashlib
 import html
 import json
 from contextlib import asynccontextmanager
 import logging
 import os
+import re
 import secrets
 import time
 from collections import defaultdict, deque
@@ -13,19 +15,22 @@ from urllib.parse import unquote_plus, urlparse
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import case, func, select, update
+from sqlalchemy import case, delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from .insights import Point, analyze
 from .migrate import upgrade
-from .alerts import send_alert, send_verification
+from .alerts import clean, send_alert, send_verification
 from .models import Coupon, CouponReport, Price, Product, Session, TelegramLink, Watch, EmailAddress, EmailSend, EmailThrottle, engine, now
 
 log = logging.getLogger("cheapr")
 
 # Store key -> hostnames its product URLs must live on (stops observations for one store polluting another).
 STORES = {"amazon": ("amazon.in",), "flipkart": ("flipkart.com",), "myntra": ("myntra.com",), "ajio": ("ajio.com",)}
+# Product images are only accepted from each store's own image CDN (the popup and alerts load them for everyone).
+IMAGE_HOSTS = {"amazon": ("media-amazon.com", "ssl-images-amazon.com"), "flipkart": ("flixcart.com",),
+               "myntra": ("myntassets.com",), "ajio": ("ajio.com", "sheinindia.in")}
 DEDUPE_WINDOW = timedelta(hours=6)
 MAX_SWING = (0.2, 5.0)  # an observation outside 20%..500% of the last price is treated as bogus
 MIN_CONFIRMATIONS = 2  # distinct clients before a user-submitted coupon is listed
@@ -79,9 +84,29 @@ async def rate_limit(request: Request, call_next):
     return await call_next(request)
 
 
-def get_db():
-    with Session.begin() as db:
-        yield db
+@app.middleware("http")
+async def db_session(request: Request, call_next):
+    """One session per API request, committed BEFORE the response is returned: a failed commit becomes a 500
+    instead of a 200 for data that was never saved (yield-dependency teardown runs after the response is sent)."""
+    if not request.url.path.startswith("/api/"):
+        return await call_next(request)
+    with Session() as db:
+        request.state.db = db
+        response = await call_next(request)
+        if response.status_code >= 400:
+            db.rollback()
+            return response
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+            log.exception("commit failed")
+            return JSONResponse({"detail": "could not save, please retry"}, status_code=500)
+        return response
+
+
+def get_db(request: Request):
+    return request.state.db
 
 
 # ---------- price history ----------
@@ -96,6 +121,7 @@ class Observation(BaseModel):
     price: float = Field(gt=0, lt=1e8)
     mrp: float | None = Field(None, gt=0, lt=1e8)
     in_stock: bool = True
+    client_id: str | None = Field(None, pattern=UUID)
 
 
 def host_ok(store: str, url: str) -> bool:
@@ -106,36 +132,89 @@ def host_ok(store: str, url: str) -> bool:
     return store in STORES and any(host == h or host.endswith("." + h) for h in STORES[store])
 
 
+def safe_image(store: str, url: str) -> str:
+    u = urlparse(url or "")
+    host = (u.hostname or "").lower()
+    ok = u.scheme == "https" and any(host == h or host.endswith("." + h) for h in IMAGE_HOSTS.get(store, ()))
+    return url if ok else ""
+
+
 def find_product(db, store: str, product_id: str) -> Product | None:
     return db.scalar(select(Product).where(Product.store == store, Product.product_id == product_id))
 
 
+def source_of(client_id: str | None, request: Request) -> str:
+    """Stable anonymous source tag: hashed install id, else hashed IP. Never stored raw."""
+    raw = client_id or ("ip:" + (request.client.host if request.client else "?"))
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+
 @app.post("/api/v1/observations")
-def observe(o: Observation, bg: BackgroundTasks, db=Depends(get_db)):
+def observe(o: Observation, request: Request, bg: BackgroundTasks, db=Depends(get_db)):
     if not host_ok(o.store, o.url):
         raise HTTPException(422, "url does not belong to store")
     p = find_product(db, o.store, o.product_id)
-    if p is not None and not (p.last_price * MAX_SWING[0] <= o.price <= p.last_price * MAX_SWING[1]):
-        raise HTTPException(422, "price differs too much from recent history")
     if p is None:
-        p = Product(store=o.store, product_id=o.product_id, url=o.url, last_price=o.price)
+        p = Product(store=o.store, product_id=o.product_id, url=o.url, last_price=o.price,
+                    title=clean(o.title, 512), image=safe_image(o.store, o.image), currency=o.currency)
         db.add(p)
         db.flush()
-    p.title, p.image, p.currency = o.title or p.title, o.image or p.image, o.currency
-    for alert in record_price(db, p, o.price, o.mrp, o.in_stock):
+    # Title/image are kept from the first sighting: a later client can't rewrite what alerts and the popup show.
+    p.title = p.title or clean(o.title, 512)
+    p.image = p.image or safe_image(o.store, o.image)
+    result = record_price(db, p, o.price, o.mrp, o.in_stock, source_of(o.client_id, request))
+    for alert in result["alerts"]:
         bg.add_task(send_alert, alert)
-    return {"ok": True}
+    return {"ok": True, "accepted": result["accepted"]}
 
 
-def record_price(db, p: Product, price: float, mrp: float | None, in_stock: bool) -> list[dict]:
-    """Store a price point (deduped) and fire watches. Returns alerts to deliver. Shared by the API and the worker."""
+SOURCE_GAP = timedelta(hours=1)  # one counted observation per source per product per hour
+CONFIRM_WINDOW = timedelta(hours=24)
+
+
+def record_price(db, p: Product, price: float, mrp: float | None, in_stock: bool, source: str) -> dict:
+    """Store a price point and fire watches; shared by the API (crowd) and the worker (source="worker").
+
+    Crowd input is untrusted: prices outside the sanity band are held as suspect until a second, different source
+    agrees (this also unfreezes a product whose first price was wrong), and a crowd price that would fire alerts
+    needs a second source or a worker re-check first. Returns {"accepted": bool, "alerts": [...]}."""
+    trusted, t = source == "worker", now()
     if mrp is not None and not (price <= mrp <= price * 20):
         mrp = None  # implausible MRP: keep the price, drop the MRP
-    last = db.scalar(select(Price).where(Price.product_fk == p.id).order_by(Price.observed_at.desc()).limit(1))
-    if not (last and last.price == price and last.in_stock == in_stock and now() - last.observed_at < DEDUPE_WINDOW):
-        db.add(Price(product_fk=p.id, price=price, mrp=mrp, in_stock=in_stock))
-    p.last_price, p.updated_at = price, now()
-    return trigger_watches(db, p) if in_stock else []
+    if not trusted and db.scalar(select(Price.id).where(Price.product_fk == p.id, Price.source == source,
+                                                        Price.observed_at >= t - SOURCE_GAP).limit(1)):
+        return {"accepted": False, "alerts": []}  # same source again within the hour: ignore
+    in_band = p.last_price * MAX_SWING[0] <= price <= p.last_price * MAX_SWING[1]
+    if not in_band:
+        agree = db.scalars(select(Price).where(Price.product_fk == p.id, Price.suspect.is_(True), Price.source != source,
+                                               Price.observed_at >= t - CONFIRM_WINDOW,
+                                               Price.price.between(price * 0.95, price * 1.05))).all()
+        if not (trusted or agree):
+            db.add(Price(product_fk=p.id, price=price, mrp=mrp, in_stock=in_stock, source=source, suspect=True, observed_at=t))
+            return {"accepted": False, "alerts": []}
+        for row in agree:
+            row.suspect = False
+    last = db.scalar(select(Price).where(Price.product_fk == p.id, Price.suspect.is_(False))
+                     .order_by(Price.observed_at.desc()).limit(1))
+    if not (last and last.price == price and last.in_stock == in_stock and t - last.observed_at < DEDUPE_WINDOW):
+        db.add(Price(product_fk=p.id, price=price, mrp=mrp, in_stock=in_stock, source=source, observed_at=t))
+    p.last_price, p.updated_at = price, t
+    if not in_stock:
+        return {"accepted": True, "alerts": []}
+    if trusted:
+        p.needs_check = False
+        return {"accepted": True, "alerts": trigger_watches(db, p)}
+    crossing = db.scalar(select(Watch.id).where(Watch.product_fk == p.id, Watch.target_price >= price,
+                                                Watch.triggered_at.is_(None) | (Watch.mode == "any")).limit(1))
+    if not crossing:
+        return {"accepted": True, "alerts": []}
+    confirmed = db.scalar(select(Price.id).where(Price.product_fk == p.id, Price.suspect.is_(False), Price.source != source,
+                                                 Price.source != "", Price.observed_at >= t - CONFIRM_WINDOW,
+                                                 Price.price <= price * 1.02).limit(1))
+    if confirmed:
+        return {"accepted": True, "alerts": trigger_watches(db, p)}
+    p.needs_check = True  # one unconfirmed report: the worker re-checks it before anyone is alerted
+    return {"accepted": True, "alerts": []}
 
 
 def find_consent(db, client_id: str, email: str) -> EmailAddress | None:
@@ -197,13 +276,16 @@ def request_verification(db, client_id: str, email: str, bg: BackgroundTasks) ->
 
 
 def trigger_watches(db, p: Product, notify: bool = True) -> list[dict]:
-    """Mark watches at/below target as triggered. notify=False (saving a watch) flags without spending mail budget."""
+    """Fire watches at/below target. "any" watches re-arm just under each new low so every further drop alerts.
+    notify=False (saving a watch) flags without spending mail budget."""
     alerts = []
-    hits = db.scalars(select(Watch).where(Watch.product_fk == p.id, Watch.triggered_at.is_(None),
-                                          Watch.target_price >= p.last_price)
+    hits = db.scalars(select(Watch).where(Watch.product_fk == p.id, Watch.target_price >= p.last_price,
+                                          Watch.triggered_at.is_(None) | (Watch.mode == "any"))
                       .order_by(func.lower(func.coalesce(Watch.email, "")), Watch.id)).all()  # fixed lock order
     for w in hits:
         w.triggered_at, w.triggered_price = now(), p.last_price
+        if w.mode == "any":
+            w.target_price = max(round(p.last_price - 1, 2), 0.01)  # next alert needs a strictly lower price
         if not notify:
             continue
         link = db.scalar(select(TelegramLink).where(TelegramLink.client_id == w.client_id, TelegramLink.chat_id.is_not(None)))
@@ -213,20 +295,36 @@ def trigger_watches(db, p: Product, notify: bool = True) -> list[dict]:
     return alerts
 
 
+MAX_POINTS = 400
+
+
+def chart_points(rows: list[Price]) -> list[dict]:
+    """Points for the chart; long histories are reduced to each day's lowest price (insights use every row)."""
+    pts = [{"t": r.observed_at.isoformat() + "Z", "price": r.price, "in_stock": r.in_stock} for r in rows]
+    if len(pts) <= MAX_POINTS:
+        return pts
+    days: dict[str, dict] = {}
+    for pt in pts:
+        d = days.setdefault(pt["t"][:10], pt)
+        if pt["in_stock"] and (pt["price"] < d["price"] or not d["in_stock"]):
+            days[pt["t"][:10]] = pt
+    return list(days.values())
+
+
 @app.get("/api/v1/products/{store}/{product_id}/history")
 def history(store: str, product_id: str, days: int = 90, db=Depends(get_db)):
     p = find_product(db, store, product_id)
     if p is None:
         raise HTTPException(404, "unknown product")
-    rows = db.scalars(select(Price).where(Price.product_fk == p.id, Price.observed_at >= now() - timedelta(days=730))
-                      .order_by(Price.observed_at)).all()
+    rows = db.scalars(select(Price).where(Price.product_fk == p.id, Price.suspect.is_(False),
+                                          Price.observed_at >= now() - timedelta(days=730)).order_by(Price.observed_at)).all()
     mrps = sorted(r.mrp for r in rows[-7:] if r.mrp)
     mrp = mrps[len(mrps) // 2] if mrps else None  # median of recent reports: one bogus MRP can't drive the insight
     result = analyze([Point(r.observed_at, r.price, r.in_stock) for r in rows], mrp, now(), max(7, min(days, 365)))
     return {
         "product": {"store": p.store, "product_id": p.product_id, "title": p.title, "url": p.url,
                     "image": p.image, "currency": p.currency, "price": p.last_price, "mrp": mrp},
-        "points": [{"t": r.observed_at.isoformat() + "Z", "price": r.price, "in_stock": r.in_stock} for r in rows],
+        "points": chart_points(rows),
         **result,
     }
 
@@ -238,12 +336,13 @@ class WatchIn(BaseModel):
     store: str = Field(max_length=32)
     product_id: str = Field(max_length=64)
     target_price: float = Field(gt=0, lt=1e8)
+    mode: str = Field("target", pattern="^(target|any)$")
     email: str | None = Field(None, pattern=EMAIL, max_length=320)
 
 
 def watch_out(w: Watch, p: Product) -> dict:
     return {"id": w.id, "store": p.store, "product_id": p.product_id, "title": p.title, "url": p.url,
-            "image": p.image, "price": p.last_price, "target_price": w.target_price,
+            "image": p.image, "price": p.last_price, "target_price": w.target_price, "mode": w.mode,
             "triggered_at": w.triggered_at.isoformat() + "Z" if w.triggered_at else None,
             "triggered_price": w.triggered_price}
 
@@ -257,7 +356,8 @@ def add_watch(body: WatchIn, bg: BackgroundTasks, db=Depends(get_db)):
     if w is None:
         w = Watch(client_id=body.client_id, product_fk=p.id, target_price=body.target_price)
         db.add(w)
-    w.target_price, w.email, w.triggered_at, w.triggered_price = body.target_price, body.email, None, None
+    target = min(body.target_price, round(p.last_price - 1, 2)) if body.mode == "any" else body.target_price
+    w.target_price, w.mode, w.email, w.triggered_at, w.triggered_price = max(target, 0.01), body.mode, body.email, None, None
     db.flush()
     trigger_watches(db, p, notify=False)  # already below target: flag it, but never send on save (spam relay)
     if body.email:
@@ -278,6 +378,16 @@ def delete_watch(watch_id: int, client_id: str, db=Depends(get_db)):
     if w is None or w.client_id != client_id:
         raise HTTPException(404, "not found")
     db.delete(w)
+    return {"ok": True}
+
+
+@app.delete("/api/v1/clients/{client_id}")
+def delete_client(client_id: str, db=Depends(get_db)):
+    """Erase everything tied to an install: alerts, email consents, Telegram link (price points carry only a hash)."""
+    if not re.fullmatch(UUID, client_id):
+        raise HTTPException(422, "bad client id")
+    for model in (Watch, EmailAddress, TelegramLink):
+        db.execute(delete(model).where(model.client_id == client_id))
     return {"ok": True}
 
 

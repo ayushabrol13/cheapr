@@ -57,3 +57,8 @@ def test_out_of_stock_points_ignored():
 def test_inflated_sale_is_never_called_a_good_deal():
     r = analyze(series((85, 1000), (60, 1000), (21, 1500), (12, 1450), (3, 990)), None, NOW)
     assert "inflated_sale" in kinds(r) and r["verdict"] in ("fair", "buy")
+
+
+def test_flat_price_is_not_lowest_ever():
+    r = analyze(series((10, 500), (5, 500), (1, 500)), None, NOW)
+    assert r["verdict"] == "fair" and kinds(r) == ["stable"]

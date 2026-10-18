@@ -1,14 +1,9 @@
-import os
-import tempfile
 import uuid
 
-os.environ.setdefault("DATABASE_URL", f"sqlite:///{tempfile.mkdtemp()}/test.db")  # CI/dev may point at Postgres
-os.environ["ADMIN_TOKEN"] = "secret"
+import pytest
+from fastapi.testclient import TestClient
 
-import pytest  # noqa: E402
-from fastapi.testclient import TestClient  # noqa: E402
-
-from app.main import app  # noqa: E402
+from app.main import app
 
 CID = str(uuid.uuid4())
 OBS = {"store": "amazon", "product_id": "B0TEST0001", "url": "https://www.amazon.in/dp/B0TEST0001",
@@ -26,9 +21,13 @@ def test_rejects_url_from_other_store(c):
     assert r.status_code == 422
 
 
+def obs(price, **kw):
+    return {**OBS, "price": price, "client_id": str(uuid.uuid4()), **kw}  # a fresh install per report
+
+
 def test_history_dedupes_and_tracks_changes(c):
     for price in (1000, 1000, 900, 950):
-        assert c.post("/api/v1/observations", json={**OBS, "price": price}).status_code == 200
+        assert c.post("/api/v1/observations", json=obs(price)).status_code == 200
     h = c.get("/api/v1/products/amazon/B0TEST0001/history").json()
     assert [p["price"] for p in h["points"]] == [1000, 900, 950]  # repeated 1000 deduped
     assert h["stats"]["low"] == 900 and h["stats"]["high"] == 1000 and h["stats"]["current"] == 950
@@ -39,16 +38,21 @@ def test_rejects_bad_urls_and_wild_prices(c):
     for url in ("http://www.amazon.in/dp/B0TEST0001", "https://x@www.amazon.in/dp/B0TEST0001",
                 "https://evil.example\\@www.amazon.in/dp/B0TEST0001"):
         assert c.post("/api/v1/observations", json={**OBS, "url": url}).status_code == 422
-    assert c.post("/api/v1/observations", json={**OBS, "price": 1}).status_code == 422
+    r = c.post("/api/v1/observations", json=obs(1))  # 1000x below: held as suspect, not shown
+    assert r.status_code == 200 and r.json()["accepted"] is False
+    assert 1 not in [p["price"] for p in c.get("/api/v1/products/amazon/B0TEST0001/history").json()["points"]]
 
 
 def test_watch_triggers_on_drop(c):
     w = c.post("/api/v1/watches", json={"client_id": CID, "store": "amazon", "product_id": "B0TEST0001",
                                         "target_price": 800}).json()
     assert w["triggered_at"] is None
-    c.post("/api/v1/observations", json={**OBS, "price": 799})
+    c.post("/api/v1/observations", json=obs(799))
     [w] = c.get("/api/v1/watches", params={"client_id": CID}).json()
-    assert w["triggered_price"] == 799
+    assert w["triggered_at"] is None  # one unconfirmed crowd report never alerts
+    c.post("/api/v1/observations", json=obs(799))
+    [w] = c.get("/api/v1/watches", params={"client_id": CID}).json()
+    assert w["triggered_price"] == 799  # a second, different source confirms it
     assert c.delete(f"/api/v1/watches/{w['id']}", params={"client_id": "someone-else"}).status_code == 404
     assert c.delete(f"/api/v1/watches/{w['id']}", params={"client_id": CID}).status_code == 200
 
@@ -86,3 +90,67 @@ def test_admin_endpoints(c):
     assert pending["listed"] is False
     assert c.delete(f"/api/v1/admin/coupons/{pending['id']}", headers=H).status_code == 200
     assert c.get("/admin").status_code == 200
+
+
+def test_same_source_counts_once_per_hour(c):
+    cid = str(uuid.uuid4())
+    o = {**OBS, "product_id": "B0SPAM0001", "url": "https://www.amazon.in/dp/B0SPAM0001", "client_id": cid}
+    assert c.post("/api/v1/observations", json={**o, "price": 500}).json()["accepted"] is True
+    assert c.post("/api/v1/observations", json={**o, "price": 400}).json()["accepted"] is False
+
+
+def test_out_of_band_price_needs_two_sources_then_unfreezes(c):
+    o = lambda p: {**OBS, "product_id": "B0BAND0001", "url": "https://www.amazon.in/dp/B0BAND0001", "price": p,  # noqa: E731
+                   "client_id": str(uuid.uuid4())}
+    c.post("/api/v1/observations", json=o(100))  # wrong first price (say, an EMI amount)
+    assert c.post("/api/v1/observations", json=o(9000)).json()["accepted"] is False
+    assert c.post("/api/v1/observations", json=o(9100)).json()["accepted"] is True  # second source agrees: accepted
+    assert c.get("/api/v1/products/amazon/B0BAND0001/history").json()["product"]["price"] == 9100
+
+
+def test_title_and_image_keep_first_sighting(c):
+    o = {**OBS, "product_id": "B0TITLE001", "url": "https://www.amazon.in/dp/B0TITLE001", "title": "Real", "price": 10}
+    c.post("/api/v1/observations", json={**o, "client_id": str(uuid.uuid4())})
+    c.post("/api/v1/observations", json={**o, "title": "Click my scam", "image": "https://evil.example/x.png",
+                                         "client_id": str(uuid.uuid4())})
+    p = c.get("/api/v1/products/amazon/B0TITLE001/history").json()["product"]
+    assert p["title"] == "Real" and "evil" not in p["image"]
+    c.post("/api/v1/observations", json={**o, "image": "https://m.media-amazon.com/images/I/x.jpg", "client_id": str(uuid.uuid4())})
+    assert c.get("/api/v1/products/amazon/B0TITLE001/history").json()["product"]["image"].startswith("https://m.media-amazon.com/")
+
+
+def test_any_drop_alerts_rearm_on_each_new_low(c):
+    cid = str(uuid.uuid4())
+    o = lambda p: {**OBS, "product_id": "B0ANY00001", "url": "https://www.amazon.in/dp/B0ANY00001", "price": p,  # noqa: E731
+                   "client_id": str(uuid.uuid4())}
+    c.post("/api/v1/observations", json=o(1000))
+    w = c.post("/api/v1/watches", json={"client_id": cid, "store": "amazon", "product_id": "B0ANY00001",
+                                        "target_price": 1000, "mode": "any"}).json()
+    assert w["target_price"] == 999 and w["triggered_at"] is None
+    for _ in range(2):
+        c.post("/api/v1/observations", json=o(950))
+    [w] = c.get("/api/v1/watches", params={"client_id": cid}).json()
+    assert w["triggered_price"] == 950 and w["target_price"] == 949  # re-armed below the new low
+
+
+def test_delete_client_erases_alerts(c):
+    cid = str(uuid.uuid4())
+    c.post("/api/v1/watches", json={"client_id": cid, "store": "amazon", "product_id": "B0TEST0001", "target_price": 5})
+    assert c.get("/api/v1/watches", params={"client_id": cid}).json()
+    assert c.delete(f"/api/v1/clients/{cid}").status_code == 200
+    assert c.get("/api/v1/watches", params={"client_id": cid}).json() == []
+
+
+def test_failed_commit_is_not_reported_as_success(c):
+    from fastapi import Depends
+    from app.main import get_db
+    from app.models import Coupon
+
+    @app.post("/api/v1/_probe_commit")
+    def probe(db=Depends(get_db)):
+        db.add(Coupon(store="probe.in", code="DUP"))
+        db.add(Coupon(store="probe.in", code="DUP"))  # unique violation at commit
+        return {"ok": True}
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        assert client.post("/api/v1/_probe_commit").status_code == 500

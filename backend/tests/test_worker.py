@@ -43,7 +43,7 @@ def test_telegram_start_links_chat_and_alerts_use_it(c, monkeypatch):
 def test_worker_refresh_records_price_and_fires_alert(c, monkeypatch):
     cid = str(uuid.uuid4())
     obs = {"store": "amazon", "product_id": "B0FC2YFSN4", "url": "https://www.amazon.in/dp/B0FC2YFSN4", "title": "boAt", "price": 999}
-    assert c.post("/api/v1/observations", json=obs).status_code == 200
+    assert c.post("/api/v1/observations", json=obs).status_code == 200  # worker refresh is trusted: one source suffices
     c.post("/api/v1/watches", json={"client_id": cid, "store": "amazon", "product_id": "B0FC2YFSN4", "target_price": 900})
     with Session.begin() as db:  # pretend nobody has seen it for a day
         db.scalar(select(Product).where(Product.product_id == "B0FC2YFSN4")).updated_at = now() - timedelta(days=1)
@@ -52,6 +52,9 @@ def test_worker_refresh_records_price_and_fires_alert(c, monkeypatch):
     alerts = []
     monkeypatch.setattr(worker, "send_alert", alerts.append)
     monkeypatch.setattr(worker.time, "sleep", lambda s: None)
+    with Session.begin() as db:  # only this product is due in this test
+        for other in db.scalars(select(Product).where(Product.product_id != "B0FC2YFSN4")):
+            other.needs_check, other.checked_at = False, now()
     assert worker.refresh_due(client) == 1
     assert alerts and alerts[0]["price"] == 867 and alerts[0]["target"] == 900
     with Session() as db:
@@ -77,7 +80,8 @@ def test_email_alerts_need_double_opt_in(c, monkeypatch):
     assert c.get("/api/v1/email/status", params={"client_id": other, "email": email}).json()["verified"] is False
     alerts = []
     monkeypatch.setattr(m, "send_alert", alerts.append)
-    c.post("/api/v1/observations", json={**obs, "price": 940})
+    for _ in range(2):  # two independent reports confirm the drop
+        c.post("/api/v1/observations", json={**obs, "price": 940, "client_id": str(uuid.uuid4())})
     assert alerts and alerts[0]["email"] == email
 
 

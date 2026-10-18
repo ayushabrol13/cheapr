@@ -13,7 +13,7 @@ from sqlalchemy import select
 
 from .alerts import send_alert, telegram_api
 from .extract import extract_price
-from .main import TG_CODE_TTL, host_ok, record_price, startup
+from .main import TG_CODE_TTL, host_ok, record_price
 from .models import Product, Session, TelegramLink, Watch, now
 
 log = logging.getLogger("cheapr.worker")
@@ -51,11 +51,19 @@ def fetch_store_page(client: httpx.Client, store: str, url: str) -> str | None:
 
 def refresh_due(client: httpx.Client) -> int:
     """Re-check products that someone is watching and nobody has seen recently. Returns products refreshed."""
+    stale = now() - REFRESH_EVERY
     with Session.begin() as db:
+        # Unconfirmed alert-crossing prices first, then watched products not attempted recently. checked_at moves on
+        # every attempt, so captcha'd pages don't sit at the front of the queue forever.
         due = db.scalars(select(Product).join(Watch, Watch.product_fk == Product.id)
-                         .where(Watch.triggered_at.is_(None), Product.updated_at < now() - REFRESH_EVERY)
-                         .distinct().order_by(Product.updated_at).limit(MAX_PER_CYCLE)).all()
+                         .where(Product.needs_check | ((Watch.triggered_at.is_(None) | (Watch.mode == "any"))
+                                                       & (Product.updated_at < stale)
+                                                       & (Product.checked_at.is_(None) | (Product.checked_at < stale))))
+                         .distinct().order_by(Product.needs_check.desc(), Product.checked_at.asc().nulls_first())
+                         .limit(MAX_PER_CYCLE)).all()
         targets = [(p.id, p.store, p.url) for p in due]
+        for p in due:
+            p.checked_at = now()
     done = 0
     for pid, store, url in targets:
         try:
@@ -66,12 +74,8 @@ def refresh_due(client: httpx.Client) -> int:
             got = None
         if got:
             with Session.begin() as db:
-                p = db.get(Product, pid)
-                if p.last_price * 0.2 <= got["price"] <= p.last_price * 5:  # same sanity band as crowd input
-                    alerts = record_price(db, p, got["price"], got["mrp"], got["in_stock"])
-                    done += 1
-                else:
-                    alerts = []
+                alerts = record_price(db, db.get(Product, pid), got["price"], got["mrp"], got["in_stock"], "worker")["alerts"]
+            done += 1
             for a in alerts:
                 send_alert(a)  # never raises
         else:
@@ -103,9 +107,21 @@ def poll_telegram(offset: int) -> int:
     return offset
 
 
+def wait_for_schema() -> None:
+    for _ in range(60):
+        try:
+            with Session() as db:
+                db.execute(select(Product.id).limit(1))
+                return
+        except Exception:
+            log.info("waiting for database migrations…")
+            time.sleep(5)
+    raise SystemExit("database schema not ready")
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
-    startup()
+    wait_for_schema()  # the API container runs migrations; running them here too would race on a fresh database
     offset, next_refresh = 0, 0.0
     with httpx.Client(http2=False) as client:
         while True:
