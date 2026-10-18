@@ -86,4 +86,11 @@ node --test extension/test/*.test.mjs              # extractor
 - **Selectors drift.** Store page markup changes. Fix product detection in `lib/extract.js` (JSON-LD is the most stable source) and the Spend Lens parsers in `content/spend.js`.
 - **Coupon heuristics are generic.** They cover Shopify and WooCommerce plus keyword matching. Stores with custom coupon popups may need a site rule.
 - **Spend Lens is best-effort.** It reads each site's own order pages and endpoints, which can change without notice. Use it on your own account only.
-- **Observations are trusted** after a store-host check. Add per-client rate limiting before opening the backend to the public.
+- **Not ready for public hosting yet.** Built-in protections:
+  - strict store-URL checks
+  - observations far outside 20–500% of the last price are rejected
+  - each client gets one vote per coupon
+  - user-submitted codes stay hidden until two different clients confirm them
+  - no email is sent when a watch is saved
+
+  Before exposing the API, add per-client rate limits and email double opt-in, since alert addresses are currently unverified.

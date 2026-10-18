@@ -19,6 +19,8 @@ log = logging.getLogger("cheapr")
 # Store key -> hostnames its product URLs must live on (stops observations for one store polluting another).
 STORES = {"amazon": ("amazon.in",), "flipkart": ("flipkart.com",), "myntra": ("myntra.com",), "ajio": ("ajio.com",)}
 DEDUPE_WINDOW = timedelta(hours=6)
+MAX_SWING = (0.2, 5.0)  # an observation outside 20%..500% of the last price is treated as bogus
+MIN_CONFIRMATIONS = 2  # distinct clients before a user-submitted coupon is listed
 UUID = r"^[0-9a-fA-F-]{36}$"
 CODE = r"^[A-Za-z0-9_-]{2,40}$"
 EMAIL = r"^[^@\s]{1,64}@[^@\s]{1,255}\.[^@\s]+$"
@@ -62,7 +64,10 @@ class Observation(BaseModel):
 
 
 def host_ok(store: str, url: str) -> bool:
-    host = (urlparse(url).hostname or "").lower()
+    u = urlparse(url)
+    if u.scheme != "https" or u.username or u.password or "\\" in url or any(ord(ch) < 33 for ch in url):
+        return False
+    host = (u.hostname or "").lower()
     return store in STORES and any(host == h or host.endswith("." + h) for h in STORES[store])
 
 
@@ -76,6 +81,8 @@ def observe(o: Observation, bg: BackgroundTasks, db=Depends(get_db)):
     if not host_ok(o.store, o.url):
         raise HTTPException(422, "url does not belong to store")
     p = find_product(db, o.store, o.product_id)
+    if p is not None and not (p.last_price * MAX_SWING[0] <= o.price <= p.last_price * MAX_SWING[1]):
+        raise HTTPException(422, "price differs too much from recent history")
     if p is None:
         p = Product(store=o.store, product_id=o.product_id, url=o.url, last_price=o.price)
         db.add(p)
@@ -90,12 +97,13 @@ def observe(o: Observation, bg: BackgroundTasks, db=Depends(get_db)):
     return {"ok": True}
 
 
-def trigger_watches(db, p: Product, bg: BackgroundTasks) -> None:
+def trigger_watches(db, p: Product, bg: BackgroundTasks | None) -> None:
     hits = db.scalars(select(Watch).where(Watch.product_fk == p.id, Watch.triggered_at.is_(None),
                                           Watch.target_price >= p.last_price))
     for w in hits:
         w.triggered_at, w.triggered_price = now(), p.last_price
-        if w.email:
+        # shortcut: emails go to unverified addresses; add double opt-in + per-address rate limit before going public
+        if w.email and bg is not None:
             bg.add_task(send_email, w.email, p.title, p.url, p.last_price, p.currency)
 
 
@@ -149,7 +157,7 @@ def watch_out(w: Watch, p: Product) -> dict:
 
 
 @app.post("/api/v1/watches")
-def add_watch(body: WatchIn, bg: BackgroundTasks, db=Depends(get_db)):
+def add_watch(body: WatchIn, db=Depends(get_db)):
     p = find_product(db, body.store, body.product_id)
     if p is None:
         raise HTTPException(404, "product not seen yet; open its page first")
@@ -159,7 +167,7 @@ def add_watch(body: WatchIn, bg: BackgroundTasks, db=Depends(get_db)):
         db.add(w)
     w.target_price, w.email, w.triggered_at, w.triggered_price = body.target_price, body.email, None, None
     db.flush()
-    trigger_watches(db, p, bg)
+    trigger_watches(db, p, None)  # already below target: flag it, but never email on save (spam relay)
     return watch_out(w, p)
 
 
@@ -210,7 +218,7 @@ def coupon_scores(db, store: str) -> list[dict]:
         .group_by(Coupon.id)).all()
     out = [{"code": c.code, "description": c.description, "tries": n, "worked": int(ok),
             "score": round((ok + 1) / (n + 2), 3), "last_report": last.isoformat() + "Z" if last else None}
-           for c, n, ok, last in rows]
+           for c, n, ok, last in rows if c.source != "user" or ok >= MIN_CONFIRMATIONS]
     return sorted(out, key=lambda c: -c["score"])
 
 
@@ -237,6 +245,8 @@ def report_coupon(r: CouponReportIn, db=Depends(get_db)):
         c = Coupon(store=store, code=code, source="user")
         db.add(c)
         db.flush()
+    if db.scalar(select(CouponReport.id).where(CouponReport.coupon_fk == c.id, CouponReport.client_id == r.client_id)):
+        return {"ok": True}  # one vote per client per coupon
     db.add(CouponReport(coupon_fk=c.id, client_id=r.client_id, worked=r.worked, saving=r.saving))
     return {"ok": True}
 

@@ -35,6 +35,13 @@ def test_history_dedupes_and_tracks_changes(c):
     assert h["verdict"] == "fair"
 
 
+def test_rejects_bad_urls_and_wild_prices(c):
+    for url in ("http://www.amazon.in/dp/B0TEST0001", "https://x@www.amazon.in/dp/B0TEST0001",
+                "https://evil.example\\@www.amazon.in/dp/B0TEST0001"):
+        assert c.post("/api/v1/observations", json={**OBS, "url": url}).status_code == 422
+    assert c.post("/api/v1/observations", json={**OBS, "price": 1}).status_code == 422
+
+
 def test_watch_triggers_on_drop(c):
     w = c.post("/api/v1/watches", json={"client_id": CID, "store": "amazon", "product_id": "B0TEST0001",
                                         "target_price": 800}).json()
@@ -52,9 +59,10 @@ def test_coupons_rank_by_reports(c):
         c.post("/api/v1/coupons", json={"store": "www.shop.in", "code": code}, headers={"X-Admin-Token": "secret"})
     rep = lambda code, ok: c.post("/api/v1/coupons/report", json={"client_id": CID, "store": "shop.in",  # noqa: E731
                                                                   "code": code, "worked": ok})
-    rep("A1", False), rep("B2", True), rep("NEW9", True), rep("BAD0", False)
-    codes = [x["code"] for x in c.get("/api/v1/coupons", params={"store": "shop.in"}).json()]
-    assert codes[:2] in (["B2", "NEW9"], ["NEW9", "B2"]) and codes[-1] == "A1" and "BAD0" not in codes
+    rep("A1", False), rep("B2", True), rep("B2", True), rep("NEW9", True), rep("BAD0", False)
+    listed = {x["code"]: x for x in c.get("/api/v1/coupons", params={"store": "shop.in"}).json()}
+    assert list(listed) == ["B2", "A1"]  # NEW9 needs a second client; BAD0 never stored
+    assert listed["B2"]["tries"] == 1  # duplicate vote from same client ignored
 
 
 def test_verdict():
