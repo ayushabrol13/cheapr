@@ -108,24 +108,17 @@ def test_fetch_refuses_offsite_redirect():
     assert worker.fetch_store_page(client, "amazon", "https://www.amazon.in/dp/B0FC2YFSN4") is None
 
 
-def test_verification_mail_bounded_per_address_but_not_blockable_by_one_stranger(c, monkeypatch):
+def test_verification_mail_capped_per_address_across_installs(c, monkeypatch):
     import app.main as m
     monkeypatch.setenv("SMTP_HOST", "smtp.test")
     sent = []
     monkeypatch.setattr(m, "send_verification", lambda email, link: sent.append(email))
     obs = {"store": "amazon", "product_id": "B0BOMB0001", "url": "https://www.amazon.in/dp/B0BOMB0001", "title": "X", "price": 500}
     c.post("/api/v1/observations", json=obs)
-    watch = lambda cid: c.post("/api/v1/watches", json={"client_id": cid, "store": "amazon", "product_id": "B0BOMB0001",  # noqa: E731
-                                                       "target_price": 400, "email": "victim@example.com"})
-    stranger = str(uuid.uuid4())
-    for _ in range(3):
-        watch(stranger)  # same install retrying: one mail an hour
-    owner = str(uuid.uuid4())
-    watch(owner)  # the owner still gets their own confirmation
-    assert sent == ["victim@example.com"] * 2
-    for _ in range(10):
-        watch(str(uuid.uuid4()))  # mass install rotation
-    assert len(sent) == m.VERIFY_PER_ADDRESS  # bounded per address per rolling day
+    for _ in range(10):  # attacker rotates install IDs
+        c.post("/api/v1/watches", json={"client_id": str(uuid.uuid4()), "store": "amazon", "product_id": "B0BOMB0001",
+                                        "target_price": 400, "email": "victim@example.com"})
+    assert sent == ["victim@example.com"]  # one an hour, whoever asks
 
 
 class Clock:
@@ -149,19 +142,19 @@ def test_alert_cap_is_rolling_24h(c, monkeypatch):
         assert m.take_alert_slot(db, "inst", "roll@example.com") is True  # oldest sends aged out
 
 
-def test_verify_allowance_per_install_resets_hourly(c, monkeypatch):
+def test_verify_budget_per_address_rolls(c, monkeypatch):
     import app.main as m
     clock = Clock(m, monkeypatch)
     with Session.begin() as db:
         assert m.take_verify_slot(db, "a", "v@example.com") is True
-        assert m.take_verify_slot(db, "a", "v@example.com") is False  # same install within the hour
-        assert m.take_verify_slot(db, "b", "v@example.com") is True  # different install has its own slot
+        assert m.take_verify_slot(db, "b", "v@example.com") is False  # another install, same hour
+        for _ in range(2):
+            clock.advance(minutes=61)
+            assert m.take_verify_slot(db, "b", "v@example.com") is True
         clock.advance(minutes=61)
-        assert m.take_verify_slot(db, "a", "v@example.com") is True
-        clock.advance(minutes=61)
-        assert m.take_verify_slot(db, "a", "v@example.com") is True
-        clock.advance(minutes=61)
-        assert m.take_verify_slot(db, "a", "v@example.com") is False  # 3 per install per rolling day
+        assert m.take_verify_slot(db, "c", "v@example.com") is False  # 3 per address per rolling day
+        clock.advance(hours=22)
+        assert m.take_verify_slot(db, "c", "v@example.com") is True  # first send aged out
 
 
 def test_saving_a_watch_spends_no_alert_budget(c, monkeypatch):

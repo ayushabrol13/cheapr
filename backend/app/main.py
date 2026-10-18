@@ -30,8 +30,7 @@ DEDUPE_WINDOW = timedelta(hours=6)
 MAX_SWING = (0.2, 5.0)  # an observation outside 20%..500% of the last price is treated as bogus
 MIN_CONFIRMATIONS = 2  # distinct clients before a user-submitted coupon is listed
 ALERTS_PER_DAY = 20  # per address, rolling 24h: a runaway price feed can't spam anyone
-VERIFY_PER_INSTALL = (timedelta(hours=1), 3)  # per (install, address): 1 an hour, 3 a day
-VERIFY_PER_ADDRESS = 6  # per address across all installs, rolling 24h: bounds mail-bombing
+VERIFY_PER_ADDRESS = (timedelta(hours=1), 3)  # confirmation mails per address, any install: 1 an hour, 3 a day
 TG_CODE_TTL = timedelta(minutes=30)
 UUID = r"^[0-9a-fA-F-]{36}$"
 CODE = r"^[A-Za-z0-9_-]{2,40}$"
@@ -168,14 +167,12 @@ def take_alert_slot(db, client_id: str, email: str) -> bool:
 
 
 def take_verify_slot(db, client_id: str, email: str) -> bool:
-    """Reserve a confirmation mail. Each install has its own allowance, so one stranger can't spend the owner's;
-    the per-address cap bounds total mail. Known limit: a determined attacker using 6+ installs a day can still
-    exhaust the address cap; per-IP rate limits make that costly but not impossible."""
+    """Reserve a confirmation mail: at most 1/hour and 3/rolling-day per address, whichever install asks.
+    Trade-off (deliberate): never mailing non-consenting inboxes beats guaranteed opt-in, so a stranger who keeps
+    requesting confirmations for an address can stall its owner; per-IP rate limits and Telegram mitigate that."""
     lock_address(db, email)
-    t = now()
-    if (sends_since(db, email, "verify", t - VERIFY_PER_INSTALL[0], client_id)
-            or sends_since(db, email, "verify", t - timedelta(days=1), client_id) >= VERIFY_PER_INSTALL[1]
-            or sends_since(db, email, "verify", t - timedelta(days=1)) >= VERIFY_PER_ADDRESS):
+    t, (gap, per_day) = now(), VERIFY_PER_ADDRESS
+    if sends_since(db, email, "verify", t - gap) or sends_since(db, email, "verify", t - timedelta(days=1)) >= per_day:
         return False
     db.add(EmailSend(email=email, client_id=client_id, kind="verify", sent_at=t))
     return True
