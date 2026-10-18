@@ -43,9 +43,12 @@
     input.dispatchEvent(new Event("change", { bubbles: true }));
   }
 
-  async function tryCode(code, before) {
+  async function tryCode(code) {
     const input = findInput();
     if (!input) return null;
+    // Wait for a change from the total right before this attempt, not the original base:
+    // if the previous code couldn't be removed, the base comparison would credit it to this code.
+    const before = readTotal();
     setValue(input, code);
     const btn = findButton(input, /apply|redeem|submit|use/i);
     if (btn) btn.click();
@@ -53,9 +56,9 @@
     for (let i = 0; i < 12; i++) { // up to ~6s for the store to re-price
       await sleep(500);
       const t = readTotal();
-      if (t != null && t !== before) return t;
+      if (t != null && t !== before) return { before, after: t };
     }
-    return readTotal();
+    return { before, after: readTotal() };
   }
 
   async function removeCode() {
@@ -70,14 +73,15 @@
     let best = null;
     for (const [i, c] of coupons.entries()) {
       ui(`Trying ${c.code} (${i + 1}/${coupons.length})…`);
-      const total = await tryCode(c.code, base);
-      const saving = total != null ? base - total : 0;
+      const r = await tryCode(c.code);
+      // Unchanged total while an earlier code is still applied tells us nothing about this code.
+      const saving = r?.after != null && (r.after !== r.before || r.before === base) ? base - r.after : 0;
       send({ type: "couponReport", store, code: c.code, worked: saving > 0, saving: Math.max(0, saving) }).catch(() => {});
       if (saving > 0 && (!best || saving > best.saving)) best = { code: c.code, saving };
       await removeCode();
     }
     if (!best) return ui("No coupon lowered your total.");
-    await tryCode(best.code, readTotal());
+    await tryCode(best.code);
     ui(`Applied ${best.code}: you save ${inr(best.saving)}.`);
   }
 
@@ -89,6 +93,7 @@
       div{background:#fff;border:1px solid #e4e7ec;border-radius:12px;box-shadow:0 8px 24px rgba(16,24,40,.15);padding:10px 14px;display:flex;gap:10px;align-items:center;color:#101828}
       button{background:#6941c6;color:#fff;border:0;border-radius:8px;padding:5px 10px;cursor:pointer;font:inherit}
       button:focus-visible{outline:2px solid #6941c6;outline-offset:2px}
+      button:disabled{opacity:.5;cursor:default}
     </style><div role="status"><span></span><button>Try all</button></div>`;
     const msg = root.querySelector("span"), btn = root.querySelector("button");
     msg.textContent = `Cheapr found ${coupons.length} coupon${coupons.length > 1 ? "s" : ""}`;

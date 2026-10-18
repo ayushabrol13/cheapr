@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cheapr Admin</title>
+<style>
+  :root{--fg:#101828;--muted:#667085;--line:#e4e7ec;--card:#fff;--bg:#f9fafb;--accent:#6941c6;--accent-soft:#f4ebff;--ok:#067647;--bad:#b42318}
+  @media (prefers-color-scheme:dark){:root{--fg:#f2f4f7;--muted:#98a2b3;--line:#283244;--card:#161e2e;--bg:#0c111d;--accent:#9e77ed;--accent-soft:#2c1c5f;--ok:#47cd89;--bad:#f97066}}
+  *{box-sizing:border-box}
+  body{margin:0;font:14px/1.45 system-ui,-apple-system,sans-serif;color:var(--fg);background:var(--bg)}
+  header{display:flex;align-items:center;gap:10px;padding:14px 24px;background:var(--card);border-bottom:1px solid var(--line)}
+  header b{font-size:16px}header .muted{margin-left:auto}
+  .logo{width:26px;height:26px;border-radius:7px;background:var(--accent);display:grid;place-items:center;color:#fff;font-weight:700}
+  nav{display:flex;gap:4px;padding:0 24px;background:var(--card);border-bottom:1px solid var(--line)}
+  nav button{background:none;border:0;padding:12px 14px;font:inherit;color:var(--muted);cursor:pointer;border-bottom:2px solid transparent}
+  nav button[aria-selected=true]{color:var(--fg);border-color:var(--accent);font-weight:600}
+  main{max-width:1180px;margin:0 auto;padding:24px}
+  .muted{color:var(--muted)}
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:16px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 18px}
+  .card .n{font-size:26px;font-weight:700;margin-top:4px}
+  h2{font-size:15px;margin:28px 0 10px}
+  .panel{background:var(--card);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+  .toolbar{display:flex;gap:8px;align-items:center;padding:12px 16px;border-bottom:1px solid var(--line);flex-wrap:wrap}
+  input,select{font:inherit;padding:7px 10px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg)}
+  .btn{background:var(--accent);color:#fff;border:0;border-radius:8px;padding:7px 14px;font:inherit;cursor:pointer}
+  .btn.ghost{background:none;color:var(--muted);padding:4px 8px}
+  .btn.ghost:hover{color:var(--bad)}
+  table{width:100%;border-collapse:collapse}
+  th,td{text-align:left;padding:10px 16px;border-bottom:1px solid var(--line);vertical-align:middle}
+  th{font-size:12px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.03em}
+  tr:last-child td{border-bottom:0}
+  td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+  code{font:600 13px ui-monospace,monospace;background:var(--accent-soft);color:var(--accent);padding:2px 6px;border-radius:5px}
+  .tag{font-size:12px;padding:1px 8px;border-radius:99px;border:1px solid var(--line);color:var(--muted)}
+  .bar{display:inline-block;width:60px;height:6px;border-radius:3px;background:var(--line);vertical-align:middle;margin-right:6px;overflow:hidden}
+  .bar i{display:block;height:100%;background:var(--ok)}
+  .title{max-width:380px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  a{color:var(--accent)}
+  .down{color:var(--ok)}.up{color:var(--bad)}
+  .login{max-width:360px;margin:12vh auto;text-align:center}
+  .login form{display:flex;gap:8px;margin-top:16px}.login input{flex:1}
+  .err{color:var(--bad)}
+  :focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  @media (max-width:700px){main{padding:16px}th:nth-child(n+5),td:nth-child(n+5){display:none}}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script>
+const $ = (s, r = document) => r.querySelector(s);
+const inr = (n) => (n == null ? "–" : "₹" + Math.round(n).toLocaleString("en-IN"));
+const ago = (iso) => {
+  if (!iso) return "–";
+  const m = Math.round((Date.now() - Date.parse(iso)) / 6e4);
+  return m < 60 ? `${m}m ago` : m < 1440 ? `${Math.round(m / 60)}h ago` : `${Math.round(m / 1440)}d ago`;
+};
+function el(tag, props = {}, ...kids) {
+  const e = Object.assign(document.createElement(tag), props);
+  e.append(...kids.flat().filter((k) => k != null && k !== false));
+  return e;
+}
+
+let token = sessionStorage.getItem("cheaprAdmin") || "";
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, { ...opts, headers: { "Content-Type": "application/json", "X-Admin-Token": token, ...opts.headers } });
+  if (res.status === 403) { sessionStorage.removeItem("cheaprAdmin"); token = ""; login("Token rejected."); throw new Error("forbidden"); }
+  if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || `HTTP ${res.status}`);
+  return res.json();
+}
+
+function login(error = "") {
+  $("#app").replaceChildren(el("div", { className: "login card" },
+    el("div", { className: "logo", style: "margin:0 auto 10px", textContent: "₹" }),
+    el("b", { textContent: "Cheapr Admin" }),
+    el("p", { className: "muted", textContent: "Enter the ADMIN_TOKEN from the backend's .env" }),
+    el("form", { onsubmit: (e) => { e.preventDefault(); token = e.target.t.value; sessionStorage.setItem("cheaprAdmin", token); shell(); } },
+      el("input", { name: "t", type: "password", required: true, ariaLabel: "Admin token", autocomplete: "current-password" }),
+      el("button", { className: "btn", textContent: "Sign in" })),
+    error ? el("p", { className: "err", role: "alert", textContent: error }) : null));
+}
+
+const TABS = { overview: "Overview", coupons: "Coupons", products: "Products" };
+
+function shell(tab = "overview") {
+  const view = el("main");
+  $("#app").replaceChildren(
+    el("header", {}, el("div", { className: "logo", textContent: "₹" }), el("b", { textContent: "Cheapr Admin" }),
+      el("span", { className: "muted", textContent: location.host }),
+      el("button", { className: "btn ghost", textContent: "Sign out", onclick: () => { sessionStorage.removeItem("cheaprAdmin"); token = ""; login(); } })),
+    el("nav", { role: "tablist" }, Object.entries(TABS).map(([k, label]) =>
+      el("button", { role: "tab", ariaSelected: String(k === tab), textContent: label, onclick: () => shell(k) }))),
+    view);
+  ({ overview, coupons, products })[tab](view).catch((e) => e.message !== "forbidden" && view.replaceChildren(el("p", { className: "err", textContent: e.message })));
+}
+
+async function overview(view) {
+  const s = await api("/api/v1/admin/stats");
+  const card = (label, n, sub) => el("div", { className: "card" }, el("div", { className: "muted", textContent: label }),
+    el("div", { className: "n", textContent: n.toLocaleString("en-IN") }), sub ? el("div", { className: "muted", textContent: sub }) : null);
+  view.replaceChildren(
+    el("div", { className: "cards" },
+      card("Products tracked", s.products, `${s.products_7d} new this week`),
+      card("Price points", s.prices, `${s.prices_24h} in last 24h`),
+      card("Active watches", s.watches, `${s.clients} clients`),
+      card("Alerts fired", s.alerts_7d, "last 7 days"),
+      card("Coupons", s.coupons, `${s.coupons_user} user-submitted`),
+      card("Coupon reports", s.reports, `${Math.round(s.report_success * 100)}% worked`)),
+    el("h2", { textContent: "Recent price drops" }),
+    el("div", { className: "panel" }, priceTable(s.recent_drops, true)));
+}
+
+function priceTable(rows, showChange) {
+  return el("table", {},
+    el("thead", {}, el("tr", {}, el("th", { textContent: "Product" }), el("th", { textContent: "Store" }),
+      el("th", { className: "num", textContent: "Price" }), showChange ? el("th", { className: "num", textContent: "Change" }) : null,
+      el("th", { className: "num", textContent: "Low / High" }), el("th", { className: "num", textContent: "Points" }),
+      el("th", { className: "num", textContent: "Watchers" }), el("th", { textContent: "Seen" }))),
+    el("tbody", {}, rows.length ? rows.map((p) => el("tr", {},
+      el("td", {}, el("div", { className: "title" }, el("a", { href: /^https:\/\//.test(p.url) ? p.url : "#", target: "_blank", rel: "noopener", textContent: p.title || p.product_id }))),
+      el("td", {}, el("span", { className: "tag", textContent: p.store })),
+      el("td", { className: "num", textContent: inr(p.price) }),
+      showChange ? el("td", { className: `num ${p.change < 0 ? "down" : "up"}`, textContent: `${p.change < 0 ? "▼" : "▲"} ${Math.abs(p.change)}%` }) : null,
+      el("td", { className: "num muted", textContent: `${inr(p.min)} / ${inr(p.max)}` }),
+      el("td", { className: "num", textContent: p.points }),
+      el("td", { className: "num", textContent: p.watchers }),
+      el("td", { className: "muted", textContent: ago(p.updated_at) })))
+      : el("tr", {}, el("td", { colSpan: 8, className: "muted", textContent: "Nothing yet." }))));
+}
+
+async function coupons(view, store = "") {
+  const rows = await api(`/api/v1/admin/coupons${store ? `?store=${encodeURIComponent(store)}` : ""}`);
+  const stores = [...new Set(rows.map((c) => c.store))].sort();
+  const add = el("form", { className: "toolbar", onsubmit: async (e) => {
+      e.preventDefault();
+      const f = e.target;
+      await api("/api/v1/coupons", { method: "POST", body: JSON.stringify({ store: f.store.value.trim(), code: f.code.value.trim(),
+        description: f.description.value.trim(), expires_at: f.expires.value ? `${f.expires.value}T23:59:59` : null }) });
+      coupons(view, store);
+    } },
+    el("input", { name: "store", placeholder: "store e.g. myntra.com", required: true, ariaLabel: "Store" }),
+    el("input", { name: "code", placeholder: "CODE", required: true, pattern: "[A-Za-z0-9_-]{2,40}", ariaLabel: "Code", style: "width:130px" }),
+    el("input", { name: "description", placeholder: "Description", ariaLabel: "Description", style: "flex:1;min-width:160px" }),
+    el("input", { name: "expires", type: "date", ariaLabel: "Expires" }),
+    el("button", { className: "btn", textContent: "Add coupon" }));
+  const filter = el("select", { ariaLabel: "Filter by store", onchange: (e) => coupons(view, e.target.value) },
+    el("option", { value: "", textContent: "All stores" }), stores.map((s) => el("option", { value: s, textContent: s, selected: s === store })));
+  view.replaceChildren(
+    el("h2", { style: "margin-top:0", textContent: "Add a coupon" }), el("div", { className: "panel" }, add),
+    el("h2", {}, "Coupons ", el("span", { className: "muted", textContent: `(${rows.length})` })),
+    el("div", { className: "panel" },
+      el("div", { className: "toolbar" }, filter, el("span", { className: "muted", textContent: "Ranked by smoothed success rate. User codes appear in the extension after 2 confirmations." })),
+      el("table", {},
+        el("thead", {}, el("tr", {}, ["Code", "Store", "Description", "Source"].map((h) => el("th", { textContent: h })),
+          el("th", { className: "num", textContent: "Worked" }), el("th", { textContent: "Score" }), el("th", { textContent: "Expires" }), el("th"))),
+        el("tbody", {}, rows.map((c) => el("tr", {},
+          el("td", {}, el("code", { textContent: c.code })),
+          el("td", { textContent: c.store }),
+          el("td", { className: "muted", textContent: c.description || "–" }),
+          el("td", {}, el("span", { className: "tag", textContent: c.source === "user" ? (c.listed ? "user ✓" : "user · pending") : "admin" })),
+          el("td", { className: "num", textContent: `${c.worked}/${c.tries}` }),
+          el("td", {}, el("span", { className: "bar" }, el("i", { style: `width:${Math.round(c.score * 100)}%` })), `${Math.round(c.score * 100)}%`),
+          el("td", { className: "muted", textContent: c.expires_at ? c.expires_at.slice(0, 10) : "never" }),
+          el("td", { className: "num" }, el("button", { className: "btn ghost", textContent: "Delete", ariaLabel: `Delete ${c.code}`,
+            onclick: async () => { if (confirm(`Delete ${c.code} for ${c.store}?`)) { await api(`/api/v1/admin/coupons/${c.id}`, { method: "DELETE" }); coupons(view, store); } } }))))))));
+}
+
+async function products(view, q = "") {
+  const rows = await api(`/api/v1/admin/products?q=${encodeURIComponent(q)}`);
+  const search = el("input", { type: "search", placeholder: "Search title or product id", value: q, ariaLabel: "Search products", style: "flex:1" });
+  let t;
+  search.oninput = () => { clearTimeout(t); t = setTimeout(() => products(view, search.value), 300); };
+  view.replaceChildren(el("div", { className: "panel" }, el("div", { className: "toolbar" }, search,
+    el("span", { className: "muted", textContent: `${rows.length} shown` })), priceTable(rows, false)));
+  search.focus();
+  search.setSelectionRange(q.length, q.length);
+}
+
+token ? shell() : login();
+</script>
+</body>
+</html>

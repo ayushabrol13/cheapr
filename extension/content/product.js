@@ -38,7 +38,7 @@
       root.querySelector(".pill").onclick = () => render({ ...state, collapsed: false });
       return;
     }
-    const [label, color] = VERDICT[history?.verdict] || ["Loading…", "#475467"];
+    const [label, color] = error ? ["Offline", "#b42318"] : VERDICT[history?.verdict] || ["Loading…", "#475467"];
     const s = history?.stats || {};
     root.innerHTML = `${STYLE}<section class="card" aria-label="Cheapr price history">
       <header><b>Cheapr</b><span class="verdict" style="background:${color}">${label}</span>
