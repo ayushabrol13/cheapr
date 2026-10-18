@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Welcome to Cheapr</title>
+<link rel="stylesheet" href="welcome.css">
+</head>
+<body>
+<main>
+  <header>
+    <img src="../icons/128.png" alt="" width="56" height="56">
+    <h1>Cheapr is ready</h1>
+    <p class="lead">Real price history, fake-discount warnings and price-drop alerts, right on the product page.</p>
+  </header>
+
+  <section class="how">
+    <div><b>1. Open any product</b><span>on Amazon.in, Flipkart, Myntra or Ajio. Cheapr appears under the price.</span></div>
+    <div><b>2. See if it's a real deal</b><span>Lowest price ever, usual price, and whether the "sale" price was inflated first.</span></div>
+    <div><b>3. Set an alert</b><span>Pick a target price. We'll tell you when it drops.</span></div>
+  </section>
+
+  <form id="setup">
+    <h2>Two quick choices</h2>
+
+    <fieldset>
+      <legend>Help build price history?</legend>
+      <label class="choice"><input type="radio" name="share" value="yes" required>
+        <span><b>Share prices anonymously</b> (recommended)<br>
+        <small>When you open a product, Cheapr sends its store, product ID, title and price. No account, no browsing history, nothing about you. This is how everyone gets history.</small></span></label>
+      <label class="choice"><input type="radio" name="share" value="no">
+        <span><b>Don't share</b><br><small>You'll still see history other people have shared. Products you set alerts on are still tracked.</small></span></label>
+    </fieldset>
+
+    <fieldset>
+      <legend>Spend Tracker (optional)</legend>
+      <label class="choice"><input type="checkbox" name="spend">
+        <span><b>Show a "Scan orders" button on my order pages</b><br>
+        <small>Adds up what you've spent on Amazon, Flipkart, Swiggy and Zomato. Order data never leaves this browser.</small></span></label>
+    </fieldset>
+
+    <label class="field">Email for price-drop alerts (optional)
+      <input type="email" name="email" placeholder="you@example.com" autocomplete="email"></label>
+
+    <button class="primary">Start saving</button>
+    <p id="status" role="status"></p>
+  </form>
+
+  <section class="promise">
+    <h2>What Cheapr never does</h2>
+    <ul>
+      <li>No affiliate links or cookie swapping. We don't earn from your purchases.</li>
+      <li>No browsing history collection. Cheapr only runs on supported shopping sites.</li>
+      <li>No selling or sharing of data. Spend and order data stay on your device.</li>
+    </ul>
+    <p class="muted">You can change any of this later in the Cheapr popup → Settings.</p>
+  </section>
+</main>
+<script src="welcome.js"></script>
+</body>
+</html>

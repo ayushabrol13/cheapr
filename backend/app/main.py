@@ -58,10 +58,13 @@ async def rate_limit(request: Request, call_next):
     if limit and request.url.path.startswith("/api/"):
         ip = request.client.host if request.client else "?"
         if os.environ.get("TRUST_PROXY") and request.headers.get("x-forwarded-for"):
-            ip = request.headers["x-forwarded-for"].split(",")[0].strip()
+            ip = request.headers["x-forwarded-for"].split(",")[-1].strip()  # right-most = added by our proxy, not the client
         q, t = _hits[(ip, request.method)], time.monotonic()
         while q and t - q[0] > 60:
             q.popleft()
+        if len(_hits) > 50_000:  # bound memory under key churn; dropping state only loosens limits briefly
+            for k in [k for k, v in _hits.items() if not v]:
+                del _hits[k]
         if len(q) >= limit:
             return JSONResponse({"detail": "rate limited"}, status_code=429, headers={"Retry-After": "60"})
         q.append(t)
@@ -107,6 +110,8 @@ def observe(o: Observation, bg: BackgroundTasks, db=Depends(get_db)):
     p = find_product(db, o.store, o.product_id)
     if p is not None and not (p.last_price * MAX_SWING[0] <= o.price <= p.last_price * MAX_SWING[1]):
         raise HTTPException(422, "price differs too much from recent history")
+    if o.mrp is not None and not (o.price <= o.mrp <= o.price * 20):
+        o.mrp = None  # implausible MRP: keep the price, drop the MRP
     if p is None:
         p = Product(store=o.store, product_id=o.product_id, url=o.url, last_price=o.price)
         db.add(p)
@@ -138,7 +143,8 @@ def history(store: str, product_id: str, days: int = 90, db=Depends(get_db)):
         raise HTTPException(404, "unknown product")
     rows = db.scalars(select(Price).where(Price.product_fk == p.id, Price.observed_at >= now() - timedelta(days=730))
                       .order_by(Price.observed_at)).all()
-    mrp = next((r.mrp for r in reversed(rows) if r.mrp), None)
+    mrps = sorted(r.mrp for r in rows[-7:] if r.mrp)
+    mrp = mrps[len(mrps) // 2] if mrps else None  # median of recent reports: one bogus MRP can't drive the insight
     result = analyze([Point(r.observed_at, r.price, r.in_stock) for r in rows], mrp, now(), max(7, min(days, 365)))
     return {
         "product": {"store": p.store, "product_id": p.product_id, "title": p.title, "url": p.url,

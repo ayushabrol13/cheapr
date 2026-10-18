@@ -52,3 +52,8 @@ def test_out_of_stock_points_ignored():
     pts = series((30, 100), (20, 90), (10, 95))
     pts.append(Point(NOW - timedelta(days=1), 10, in_stock=False))
     assert analyze(pts, None, NOW)["stats"]["current"] == 95
+
+
+def test_inflated_sale_is_never_called_a_good_deal():
+    r = analyze(series((85, 1000), (60, 1000), (21, 1500), (12, 1450), (3, 990)), None, NOW)
+    assert "inflated_sale" in kinds(r) and r["verdict"] in ("fair", "buy")

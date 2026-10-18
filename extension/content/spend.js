@@ -1,4 +1,4 @@
-// Spend Lens: runs on YOUR order-history pages and reads them same-origin with your existing session.
+// Spend Tracker (opt-in): runs on YOUR order-history pages and reads them same-origin with your existing session.
 // No header spoofing and nothing leaves the browser: results go to chrome.storage.local only.
 (() => {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -99,6 +99,9 @@
 
   const site = Object.keys(SITES).find((k) => SITES[k].test());
   if (!site) return;
+  chrome.storage.sync.get({ spend: false }).then(({ spend }) => spend && showButton());
+
+  function showButton() {
 
   const host = document.createElement("cheapr-spend");
   const root = host.attachShadow({ mode: "closed" });
@@ -107,7 +110,7 @@
     div{background:#fff;border:1px solid #e4e7ec;border-radius:12px;box-shadow:0 8px 24px rgba(16,24,40,.15);padding:10px 14px;display:flex;gap:10px;align-items:center;color:#101828;max-width:320px}
     button{background:#6941c6;color:#fff;border:0;border-radius:8px;padding:5px 10px;cursor:pointer;font:inherit;white-space:nowrap}
     button:focus-visible{outline:2px solid #6941c6;outline-offset:2px}
-  </style><div role="status"><span>Cheapr Spend Lens: see how much you've spent here.</span><button>Scan orders</button></div>`;
+  </style><div role="status"><span>Cheapr Spend Tracker: add up what you've spent here (stays on this device).</span><button>Scan orders</button></div>`;
   const msg = root.querySelector("span"), btn = root.querySelector("button");
   btn.onclick = async () => {
     btn.disabled = true;
@@ -124,4 +127,5 @@
     btn.remove();
   };
   document.documentElement.append(host);
+  }
 })();

@@ -1,34 +1,119 @@
 {
   "manifest_version": 3,
-  "name": "Cheapr: Price History, Coupons & Spend Lens",
+  "name": "__MSG_extName__",
   "short_name": "Cheapr",
-  "version": "0.1.0",
-  "description": "Price history and drop alerts for Amazon, Flipkart, Myntra and Ajio, automatic coupons at checkout, and a private spending tracker.",
-  "icons": {"16": "icons/16.png", "32": "icons/32.png", "48": "icons/48.png", "128": "icons/128.png"},
-  "action": {"default_popup": "popup/popup.html", "default_icon": {"16": "icons/16.png", "32": "icons/32.png"}},
-  "background": {"service_worker": "background.js"},
-  "permissions": ["storage", "alarms", "notifications", "offscreen"],
-  "host_permissions": [
-    "http://localhost/*", "http://127.0.0.1/*",
-    "https://www.amazon.in/*", "https://www.flipkart.com/*", "https://www.myntra.com/*", "https://www.ajio.com/*"
+  "version": "0.2.0",
+  "description": "__MSG_extDescription__",
+  "icons": {
+    "16": "icons/16.png",
+    "32": "icons/32.png",
+    "48": "icons/48.png",
+    "128": "icons/128.png"
+  },
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_icon": {
+      "16": "icons/16.png",
+      "32": "icons/32.png"
+    }
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "permissions": [
+    "storage",
+    "alarms",
+    "notifications",
+    "offscreen",
+    "scripting"
   ],
-  "optional_host_permissions": ["https://*/*", "http://*/*"],
+  "host_permissions": [
+    "http://localhost/*",
+    "http://127.0.0.1/*",
+    "https://www.amazon.in/*",
+    "https://www.flipkart.com/*",
+    "https://www.myntra.com/*",
+    "https://www.ajio.com/*"
+  ],
+  "optional_host_permissions": [
+    "https://*/*",
+    "http://*/*"
+  ],
   "content_scripts": [
     {
-      "matches": ["https://www.amazon.in/*", "https://www.flipkart.com/*", "https://www.myntra.com/*", "https://www.ajio.com/*"],
-      "js": ["lib/extract.js", "content/product.js"],
+      "matches": [
+        "https://www.amazon.in/*",
+        "https://www.flipkart.com/*",
+        "https://www.myntra.com/*",
+        "https://www.ajio.com/*"
+      ],
+      "js": [
+        "lib/extract.js",
+        "lib/format.js",
+        "content/product.js"
+      ],
       "run_at": "document_idle"
     },
     {
-      "matches": ["https://*/*"],
-      "exclude_matches": ["*://*.gov.in/*", "*://*.nic.in/*", "*://*.bank.in/*", "*://*.edu/*", "*://*.ac.in/*"],
-      "js": ["content/coupons.js"],
+      "matches": [
+        "https://www.myntra.com/*",
+        "https://www.ajio.com/*",
+        "https://www.nykaa.com/*",
+        "https://www.nykaafashion.com/*",
+        "https://www.tatacliq.com/*",
+        "https://www.croma.com/*",
+        "https://www.reliancedigital.in/*",
+        "https://www.firstcry.com/*",
+        "https://www.pepperfry.com/*",
+        "https://www.lenskart.com/*",
+        "https://www.bewakoof.com/*",
+        "https://www.thesouledstore.com/*",
+        "https://www.boat-lifestyle.com/*",
+        "https://www.mamaearth.in/*",
+        "https://www.snitch.co.in/*",
+        "https://www.puma.com/*",
+        "https://www.adidas.co.in/*",
+        "https://www.amazon.in/*",
+        "https://www.jiomart.com/*",
+        "https://www.meesho.com/*",
+        "https://myntra.com/*",
+        "https://ajio.com/*",
+        "https://nykaa.com/*",
+        "https://nykaafashion.com/*",
+        "https://tatacliq.com/*",
+        "https://croma.com/*",
+        "https://reliancedigital.in/*",
+        "https://firstcry.com/*",
+        "https://pepperfry.com/*",
+        "https://lenskart.com/*",
+        "https://bewakoof.com/*",
+        "https://thesouledstore.com/*",
+        "https://boat-lifestyle.com/*",
+        "https://mamaearth.in/*",
+        "https://snitch.co.in/*",
+        "https://puma.com/*",
+        "https://adidas.co.in/*",
+        "https://amazon.in/*",
+        "https://jiomart.com/*",
+        "https://meesho.com/*"
+      ],
+      "js": [
+        "content/coupons.js"
+      ],
       "run_at": "document_idle"
     },
     {
-      "matches": ["https://www.amazon.in/*", "https://www.flipkart.com/*", "https://www.swiggy.com/*", "https://www.zomato.com/*"],
-      "js": ["content/spend.js"],
+      "matches": [
+        "https://www.amazon.in/*",
+        "https://www.flipkart.com/*",
+        "https://www.swiggy.com/*",
+        "https://www.zomato.com/*"
+      ],
+      "js": [
+        "content/spend.js"
+      ],
       "run_at": "document_idle"
     }
-  ]
+  ],
+  "default_locale": "en"
 }

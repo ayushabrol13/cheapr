@@ -43,6 +43,7 @@ def analyze(points: list[Point], mrp: float | None, now: datetime, window_days: 
         "current": cur,
         "low": min(win_prices), "high": max(win_prices),
         "avg": weighted_avg(ps, since, now),
+        "usual": weighted_avg(ps, since, now),  # replaced by the pre-hike norm when a hike is detected
         "all_time_low": min(p.price for p in ps), "all_time_high": max(p.price for p in ps),
         "first_seen": ps[0].t.isoformat() + "Z", "observations": len(ps),
     }
@@ -72,6 +73,9 @@ def analyze(points: list[Point], mrp: float | None, now: datetime, window_days: 
     base = weighted_avg(ps, now - timedelta(days=90), now - timedelta(days=30))
     if base and peak and peak >= base * 1.15 and base * 0.97 <= cur < peak * 0.95:
         insights.append({"kind": "inflated_sale", "peak": peak, "usual": base})
+        stats["usual"] = avg = base
+        if verdict == "good":
+            verdict = "fair"  # the hike props up the average; vs the pre-hike norm this is no deal
 
     if mrp and stats["observations"] >= 5 and mrp >= stats["all_time_high"] * 1.3:
         insights.append({"kind": "inflated_mrp", "mrp": mrp, "highest": stats["all_time_high"],

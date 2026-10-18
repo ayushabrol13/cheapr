@@ -1,5 +1,7 @@
 // Checkout pages: find the coupon box, fetch known codes for this store, try them all, keep the best.
 (() => {
+  if (window.__cheaprCoupons) return; // curated + optional all-sites registrations can both match
+  window.__cheaprCoupons = true;
   if (!/cart|checkout|basket|bag|payment/i.test(location.pathname + location.hash)) return;
 
   const send = (msg) => chrome.runtime.sendMessage(msg).then((r) => (r?.ok ? r.data : Promise.reject(new Error(r?.error))));

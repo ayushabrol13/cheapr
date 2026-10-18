@@ -3,6 +3,7 @@
 (() => {
   const STORES = {
     amazon: {
+      anchor: ["#apex_desktop", "#corePriceDisplay_desktop_feature_div", "#corePrice_feature_div"], // inline card goes after the first match
       hosts: ["amazon.in"],
       id: (u) => u.pathname.match(/\/(?:dp|gp\/product|gp\/aw\/d)\/([A-Z0-9]{10})/)?.[1],
       price: [".priceToPay .a-offscreen", "#corePrice_desktop .a-price .a-offscreen",
@@ -13,11 +14,13 @@
       oos: ["#outOfStock", "#availability .a-color-price"],
     },
     flipkart: {
+      anchor: ["h1"], // inline card goes after the first match
       hosts: ["flipkart.com"],
       id: (u) => u.searchParams.get("pid") || u.pathname.match(/\/p\/(itm[0-9a-z]+)/i)?.[1],
       price: [], mrp: [], title: [], image: [], oos: [], // obfuscated classes: JSON-LD/meta only
     },
     myntra: {
+      anchor: [".pdp-price-info"], // inline card goes after the first match
       hosts: ["myntra.com"],
       id: (u) => u.pathname.match(/\/(\d{5,})\/buy/)?.[1],
       price: [".pdp-price strong"],
@@ -28,6 +31,7 @@
       oos: [".size-buttons-out-of-stock"],
     },
     ajio: {
+      anchor: [".prod-price-section"], // inline card goes after the first match
       hosts: ["ajio.com"],
       id: (u) => u.pathname.match(/\/p\/([0-9a-z_]+)/i)?.[1],
       price: [".prod-sp"],
