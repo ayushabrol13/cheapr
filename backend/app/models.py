@@ -1,7 +1,7 @@
 import os
 from datetime import datetime, timezone
 
-from sqlalchemy import (BigInteger, Boolean, DateTime, Float, ForeignKey, Integer, String, UniqueConstraint,
+from sqlalchemy import (BigInteger, Boolean, DateTime, Float, ForeignKey, Index, Integer, String, UniqueConstraint,
                         create_engine)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
@@ -99,11 +99,17 @@ class EmailAddress(Base):
 
 
 class EmailThrottle(Base):
-    """One row per address: mail budgets enforced with atomic conditional UPDATEs (no check-then-act races)."""
+    """One row per address, used only as a lock: budget checks for an address are serialised on it."""
     __tablename__ = "email_throttle"
     email: Mapped[str] = mapped_column(String(320), primary_key=True)
-    verify_window_start: Mapped[datetime] = mapped_column(DateTime, default=now)
-    verify_count: Mapped[int] = mapped_column(Integer, default=0)
-    last_verify_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    alert_day: Mapped[str] = mapped_column(String(10), default="")
-    alert_count: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class EmailSend(Base):
+    """Append-only log of mails sent; budgets count rows in a rolling 24h window."""
+    __tablename__ = "email_sends"
+    __table_args__ = (Index("ix_email_sends_email_kind_at", "email", "kind", "sent_at"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    email: Mapped[str] = mapped_column(String(320))
+    client_id: Mapped[str] = mapped_column(String(64))
+    kind: Mapped[str] = mapped_column(String(8))  # verify | alert
+    sent_at: Mapped[datetime] = mapped_column(DateTime, default=now)

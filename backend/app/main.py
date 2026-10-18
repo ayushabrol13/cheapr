@@ -14,11 +14,13 @@ from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Qu
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import case, func, select, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from .insights import Point, analyze
+from .migrate import upgrade
 from .alerts import send_alert, send_verification
-from .models import Base, Coupon, CouponReport, Price, Product, Session, TelegramLink, Watch, EmailAddress, EmailThrottle, engine, now
+from .models import Coupon, CouponReport, Price, Product, Session, TelegramLink, Watch, EmailAddress, EmailSend, EmailThrottle, engine, now
 
 log = logging.getLogger("cheapr")
 
@@ -26,15 +28,17 @@ log = logging.getLogger("cheapr")
 STORES = {"amazon": ("amazon.in",), "flipkart": ("flipkart.com",), "myntra": ("myntra.com",), "ajio": ("ajio.com",)}
 DEDUPE_WINDOW = timedelta(hours=6)
 MAX_SWING = (0.2, 5.0)  # an observation outside 20%..500% of the last price is treated as bogus
-MIN_CONFIRMATIONS = 2
-EMAILS_PER_DAY = 20  # per verified address: a runaway price feed can't spam anyone
-TG_CODE_TTL = timedelta(minutes=30)  # distinct clients before a user-submitted coupon is listed
+MIN_CONFIRMATIONS = 2  # distinct clients before a user-submitted coupon is listed
+ALERTS_PER_DAY = 20  # per address, rolling 24h: a runaway price feed can't spam anyone
+VERIFY_PER_INSTALL = (timedelta(hours=1), 3)  # per (install, address): 1 an hour, 3 a day
+VERIFY_PER_ADDRESS = 6  # per address across all installs, rolling 24h: bounds mail-bombing
+TG_CODE_TTL = timedelta(minutes=30)
 UUID = r"^[0-9a-fA-F-]{36}$"
 CODE = r"^[A-Za-z0-9_-]{2,40}$"
 EMAIL = r"^[^@\s]{1,64}@[^@\s]{1,255}\.[^@\s]+$"
 
 def startup() -> None:
-    Base.metadata.create_all(engine)
+    upgrade()  # Alembic migrations: schema changes reach existing databases (create_all never alters tables)
     seed = Path(os.environ.get("COUPON_SEED", Path(__file__).parent.parent / "seed_coupons.json"))
     if seed.exists():
         with Session.begin() as db:
@@ -139,42 +143,48 @@ def find_consent(db, client_id: str, email: str) -> EmailAddress | None:
     return db.scalar(select(EmailAddress).where(EmailAddress.client_id == client_id, EmailAddress.email == email.lower()))
 
 
-def throttle_row(db, email: str) -> None:
-    if db.get(EmailThrottle, email) is None:
-        try:
-            with db.begin_nested():
-                db.add(EmailThrottle(email=email))
-        except IntegrityError:
-            pass  # another request created it first
+def lock_address(db, email: str) -> None:
+    """Serialise budget checks for one address: upsert its lock row, then row-lock it (FOR UPDATE on Postgres;
+    SQLite serialises writers anyway). Callers lock several addresses in sorted order to avoid deadlocks."""
+    ins = pg_insert if db.bind.dialect.name == "postgresql" else sqlite_insert
+    db.execute(ins(EmailThrottle).values(email=email).on_conflict_do_nothing())
+    db.execute(select(EmailThrottle).where(EmailThrottle.email == email).with_for_update())
 
 
-def take_alert_slot(db, email: str) -> bool:
-    """Atomically count one alert against the address's daily cap; False when the cap is reached."""
-    throttle_row(db, email)
-    today, T = now().date().isoformat(), EmailThrottle
-    res = db.execute(update(T).where(T.email == email, (T.alert_day != today) | (T.alert_count < EMAILS_PER_DAY))
-                     .values(alert_count=case((T.alert_day != today, 1), else_=T.alert_count + 1), alert_day=today))
-    return res.rowcount == 1
+def sends_since(db, email: str, kind: str, since: datetime, client_id: str | None = None) -> int:
+    q = select(func.count(EmailSend.id)).where(EmailSend.email == email, EmailSend.kind == kind, EmailSend.sent_at >= since)
+    if client_id:
+        q = q.where(EmailSend.client_id == client_id)
+    return db.scalar(q) or 0
 
 
-def take_verify_slot(db, email: str) -> bool:
-    """Atomically reserve a confirmation mail: max 1/hour and 3/day per address, whatever install asks."""
-    throttle_row(db, email)
-    t, T = now(), EmailThrottle
-    fresh_window = T.verify_window_start < t - timedelta(days=1)
-    res = db.execute(update(T).where(T.email == email,
-                                     T.last_verify_at.is_(None) | (T.last_verify_at < t - timedelta(hours=1)),
-                                     fresh_window | (T.verify_count < 3))
-                     .values(verify_count=case((fresh_window, 1), else_=T.verify_count + 1),
-                             verify_window_start=case((fresh_window, t), else_=T.verify_window_start),
-                             last_verify_at=t))
-    return res.rowcount == 1
+def take_alert_slot(db, client_id: str, email: str) -> bool:
+    """Count one alert against the address's rolling-24h cap; False when the cap is reached."""
+    lock_address(db, email)
+    if sends_since(db, email, "alert", now() - timedelta(days=1)) >= ALERTS_PER_DAY:
+        return False
+    db.add(EmailSend(email=email, client_id=client_id, kind="alert", sent_at=now()))
+    return True
+
+
+def take_verify_slot(db, client_id: str, email: str) -> bool:
+    """Reserve a confirmation mail. Each install has its own allowance, so one stranger can't spend the owner's;
+    the per-address cap bounds total mail. Known limit: a determined attacker using 6+ installs a day can still
+    exhaust the address cap; per-IP rate limits make that costly but not impossible."""
+    lock_address(db, email)
+    t = now()
+    if (sends_since(db, email, "verify", t - VERIFY_PER_INSTALL[0], client_id)
+            or sends_since(db, email, "verify", t - timedelta(days=1), client_id) >= VERIFY_PER_INSTALL[1]
+            or sends_since(db, email, "verify", t - timedelta(days=1)) >= VERIFY_PER_ADDRESS):
+        return False
+    db.add(EmailSend(email=email, client_id=client_id, kind="verify", sent_at=t))
+    return True
 
 
 def email_allowed(db, client_id: str, email: str) -> bool:
     """This install confirmed this address (double opt-in) and the address is under today's cap."""
     e = find_consent(db, client_id, email)
-    return bool(e and e.verified_at) and take_alert_slot(db, e.email)
+    return bool(e and e.verified_at) and take_alert_slot(db, client_id, e.email)
 
 
 def request_verification(db, client_id: str, email: str, bg: BackgroundTasks) -> None:
@@ -184,18 +194,21 @@ def request_verification(db, client_id: str, email: str, bg: BackgroundTasks) ->
         e = EmailAddress(client_id=client_id, email=email, token=secrets.token_urlsafe(32))
         db.add(e)
     base = os.environ.get("PUBLIC_URL", "http://localhost:8000").rstrip("/")
-    # Known limit: a stranger can spend an address's hourly slot first, delaying (not blocking) the real owner.
-    if not e.verified_at and os.environ.get("SMTP_HOST") and take_verify_slot(db, email):
+    if not e.verified_at and os.environ.get("SMTP_HOST") and take_verify_slot(db, client_id, email):
         e.verify_sent_at, e.token = now(), secrets.token_urlsafe(32)  # fresh token per mail
         bg.add_task(send_verification, email, f"{base}/api/v1/email/verify?token={e.token}")
 
 
-def trigger_watches(db, p: Product) -> list[dict]:
+def trigger_watches(db, p: Product, notify: bool = True) -> list[dict]:
+    """Mark watches at/below target as triggered. notify=False (saving a watch) flags without spending mail budget."""
     alerts = []
     hits = db.scalars(select(Watch).where(Watch.product_fk == p.id, Watch.triggered_at.is_(None),
-                                          Watch.target_price >= p.last_price)).all()
+                                          Watch.target_price >= p.last_price)
+                      .order_by(func.lower(func.coalesce(Watch.email, "")), Watch.id)).all()  # fixed lock order
     for w in hits:
         w.triggered_at, w.triggered_price = now(), p.last_price
+        if not notify:
+            continue
         link = db.scalar(select(TelegramLink).where(TelegramLink.client_id == w.client_id, TelegramLink.chat_id.is_not(None)))
         alerts.append({"title": p.title, "url": p.url, "price": p.last_price, "target": w.target_price,
                        "email": w.email if w.email and email_allowed(db, w.client_id, w.email) else None,
@@ -249,7 +262,7 @@ def add_watch(body: WatchIn, bg: BackgroundTasks, db=Depends(get_db)):
         db.add(w)
     w.target_price, w.email, w.triggered_at, w.triggered_price = body.target_price, body.email, None, None
     db.flush()
-    trigger_watches(db, p)  # already below target: flag it, but never send alerts on save (spam relay)
+    trigger_watches(db, p, notify=False)  # already below target: flag it, but never send on save (spam relay)
     if body.email:
         request_verification(db, body.client_id, body.email, bg)
     return watch_out(w, p)

@@ -2,7 +2,7 @@ import os
 import tempfile
 import uuid
 
-os.environ["DATABASE_URL"] = f"sqlite:///{tempfile.mkdtemp()}/test.db"
+os.environ.setdefault("DATABASE_URL", f"sqlite:///{tempfile.mkdtemp()}/test.db")  # CI/dev may point at Postgres
 os.environ["ADMIN_TOKEN"] = "secret"
 
 import pytest  # noqa: E402

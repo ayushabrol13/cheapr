@@ -108,22 +108,70 @@ def test_fetch_refuses_offsite_redirect():
     assert worker.fetch_store_page(client, "amazon", "https://www.amazon.in/dp/B0FC2YFSN4") is None
 
 
-def test_verification_mail_throttled_per_address_across_installs(c, monkeypatch):
+def test_verification_mail_bounded_per_address_but_not_blockable_by_one_stranger(c, monkeypatch):
     import app.main as m
     monkeypatch.setenv("SMTP_HOST", "smtp.test")
     sent = []
     monkeypatch.setattr(m, "send_verification", lambda email, link: sent.append(email))
     obs = {"store": "amazon", "product_id": "B0BOMB0001", "url": "https://www.amazon.in/dp/B0BOMB0001", "title": "X", "price": 500}
     c.post("/api/v1/observations", json=obs)
-    for _ in range(5):  # attacker rotates install IDs
-        c.post("/api/v1/watches", json={"client_id": str(uuid.uuid4()), "store": "amazon", "product_id": "B0BOMB0001",
-                                        "target_price": 400, "email": "victim@example.com"})
-    assert sent == ["victim@example.com"]
+    watch = lambda cid: c.post("/api/v1/watches", json={"client_id": cid, "store": "amazon", "product_id": "B0BOMB0001",  # noqa: E731
+                                                       "target_price": 400, "email": "victim@example.com"})
+    stranger = str(uuid.uuid4())
+    for _ in range(3):
+        watch(stranger)  # same install retrying: one mail an hour
+    owner = str(uuid.uuid4())
+    watch(owner)  # the owner still gets their own confirmation
+    assert sent == ["victim@example.com"] * 2
+    for _ in range(10):
+        watch(str(uuid.uuid4()))  # mass install rotation
+    assert len(sent) == m.VERIFY_PER_ADDRESS  # bounded per address per rolling day
 
 
-def test_address_budgets_are_atomic_counters(c):
+class Clock:
+    def __init__(self, m, monkeypatch):
+        self.t = m.now()
+        monkeypatch.setattr(m, "now", lambda: self.t)
+
+    def advance(self, **kw):
+        self.t += timedelta(**kw)
+
+
+def test_alert_cap_is_rolling_24h(c, monkeypatch):
     import app.main as m
+    clock = Clock(m, monkeypatch)
     with Session.begin() as db:
-        assert [m.take_alert_slot(db, "cap@example.com") for _ in range(m.EMAILS_PER_DAY + 1)][-2:] == [True, False]
-        assert m.take_verify_slot(db, "cap@example.com") is True
-        assert m.take_verify_slot(db, "cap@example.com") is False  # within the hour
+        got = [m.take_alert_slot(db, "inst", "roll@example.com") for _ in range(m.ALERTS_PER_DAY + 1)]
+        assert got[-2:] == [True, False]
+        clock.advance(hours=23)
+        assert m.take_alert_slot(db, "inst", "roll@example.com") is False  # still inside the window
+        clock.advance(hours=2)
+        assert m.take_alert_slot(db, "inst", "roll@example.com") is True  # oldest sends aged out
+
+
+def test_verify_allowance_per_install_resets_hourly(c, monkeypatch):
+    import app.main as m
+    clock = Clock(m, monkeypatch)
+    with Session.begin() as db:
+        assert m.take_verify_slot(db, "a", "v@example.com") is True
+        assert m.take_verify_slot(db, "a", "v@example.com") is False  # same install within the hour
+        assert m.take_verify_slot(db, "b", "v@example.com") is True  # different install has its own slot
+        clock.advance(minutes=61)
+        assert m.take_verify_slot(db, "a", "v@example.com") is True
+        clock.advance(minutes=61)
+        assert m.take_verify_slot(db, "a", "v@example.com") is True
+        clock.advance(minutes=61)
+        assert m.take_verify_slot(db, "a", "v@example.com") is False  # 3 per install per rolling day
+
+
+def test_saving_a_watch_spends_no_alert_budget(c, monkeypatch):
+    import app.main as m
+    cid, email = str(uuid.uuid4()), "budget@example.com"
+    obs = {"store": "amazon", "product_id": "B0BUDGET01", "url": "https://www.amazon.in/dp/B0BUDGET01", "title": "X", "price": 500}
+    c.post("/api/v1/observations", json=obs)
+    with Session.begin() as db:
+        db.add(m.EmailAddress(client_id=cid, email=email, token=uuid.uuid4().hex, verified_at=m.now()))
+    for _ in range(3):  # target already met: flagged on save, nothing sent
+        c.post("/api/v1/watches", json={"client_id": cid, "store": "amazon", "product_id": "B0BUDGET01", "target_price": 600, "email": email})
+    with Session() as db:
+        assert m.sends_since(db, email, "alert", m.now() - timedelta(days=1)) == 0
